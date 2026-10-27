@@ -47,22 +47,24 @@ os.environ["SCROLLSHOT_API"] = f"http://127.0.0.1:{srv.server_port}/release"
 import _version  # noqa: E402
 import updater  # noqa: E402
 
+B = _version.BUILD + 100  # CI'da BUILD run numarası olur; test sürümleri hep ondan büyük olsun
+
 # 1) yeni sürüm kurulur
-state.update(build=5, shell=1)
-assert updater.auto_update() == ("updated", 5)
-assert open(os.path.join(updater.CODE, "_version.py")).read().startswith("BUILD = 5")
+state.update(build=B + 5, shell=1)
+assert updater.auto_update() == ("updated", B + 5)
+assert open(os.path.join(updater.CODE, "_version.py")).read().startswith(f"BUILD = {B + 5}")
 # 2) aynı sürüm: bir şey yapmaz
-_version.BUILD = 5
+_version.BUILD = B + 5
 assert updater.auto_update() is None
 # 3) kabuk uyumsuz: tam indirme istenir, kod değişmez
-state.update(build=6, shell=_version.SHELL + 1)
+state.update(build=B + 6, shell=_version.SHELL + 1)
 r = updater.auto_update()
 assert r and r[0] == "full", r
-assert open(os.path.join(updater.CODE, "_version.py")).read().startswith("BUILD = 5")
+assert open(os.path.join(updater.CODE, "_version.py")).read().startswith(f"BUILD = {B + 5}")
 # 4) kötü build işaretliyse atlanır
 os.makedirs(updater.HOME, exist_ok=True)
-open(os.path.join(updater.HOME, "bad_build"), "w").write("7")
-state.update(build=7, shell=1)
+open(os.path.join(updater.HOME, "bad_build"), "w").write(str(B + 7))
+state.update(build=B + 7, shell=1)
 assert updater.auto_update() is None
 # 5) ağ yok: sessizce None
 os.environ["SCROLLSHOT_API"] = "http://127.0.0.1:1/x"
