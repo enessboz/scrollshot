@@ -26,9 +26,14 @@ jobs:
           sed -i '' "s/^BUILD = .*/BUILD = $BUILD/" _version.py
           python test_stitch.py
           python test_updater.py
+          python test_app_logic.py
           pyinstaller --noconfirm --windowed --name ScrollShot \
             --osx-bundle-identifier com.enessboz.scrollshot \
-            --hidden-import Quartz --hidden-import ApplicationServices launcher.py
+            --hidden-import Quartz --hidden-import ApplicationServices \
+            --hidden-import AppKit --hidden-import Foundation launcher.py
+          # Dock'ta görünmesin, yalnız menü çubuğunda dursun
+          /usr/libexec/PlistBuddy -c 'Add :LSUIElement bool true' dist/ScrollShot.app/Contents/Info.plist
+          codesign --force --deep --sign - dist/ScrollShot.app
           ditto -c -k --keepParent dist/ScrollShot.app ScrollShot-mac.zip
           zip code.zip app.py scrollshot.py updater.py _version.py
           gh release create "build-$BUILD" ScrollShot-mac.zip code.zip \

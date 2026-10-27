@@ -1,13 +1,5 @@
-#!/usr/bin/env python3
-"""scrollshot: kaydırılan bir alanın (Teams thread, Slack, Chrome sayfası...) tek parça ekran görüntüsü.
-
-Akış: alanı fareyle seç -> program alanı otomatik kaydırıp kareler alır -> kareleri
-çakışan satırlardan birleştirir -> PNG / JPG / PDF olarak masaüstüne yazar.
-"""
-import argparse
-import datetime
+"""ScrollShot çekirdeği: kaydırılan alanı otomatik bulur, kaydırarak yakalar, birleştirir, dışa aktarır."""
 import os
-import sys
 import time
 
 import numpy as np
@@ -16,7 +8,9 @@ from PIL import Image
 PDF_MAX_PT = 14000  # PDF sayfa üst sınırı ~14400 pt; altında kal
 
 
-# ---------- birleştirme çekirdeği (ekrandan bağımsız, test edilebilir) ----------
+class CaptureError(Exception):
+    pass
+
 
 def to_gray(img, col_step=4):
     """Karşılaştırma için gri + sütun seyreltme. Satır sayısı korunur."""
@@ -44,6 +38,37 @@ def find_shift(prev, new, min_overlap_frac=0.15, tol=4.0):
     return None
 
 
+def detect_scroll_region(a_img, b_img, thresh=25, row_frac=0.01, col_frac=0.01):
+    """İki kare arasında değişen alan = kaydırılan alan (sabit başlık/yan liste/yazma kutusu elenir).
+
+    Dönüş: (x0, y0, x1, y1) piksel, ya da None.
+    """
+    a = np.asarray(a_img.convert("L"), dtype=np.int16)
+    b = np.asarray(b_img.convert("L"), dtype=np.int16)
+    d = np.abs(a - b) > thresh
+    H, W = d.shape
+    rows = d.sum(1) > max(3, row_frac * W)
+    idx = np.flatnonzero(rows)
+    if idx.size == 0:
+        return None
+    gap = max(8, int(0.05 * H))
+    runs, start, prev = [], idx[0], idx[0]
+    for i in idx[1:]:
+        if i - prev > gap:
+            runs.append((start, prev))
+            start = i
+        prev = i
+    runs.append((start, prev))
+    y0, y1 = max(runs, key=lambda r: rows[r[0]:r[1] + 1].sum())
+    if y1 - y0 < 0.15 * H:
+        return None
+    cols = d[y0:y1 + 1].sum(0) > max(2, col_frac * (y1 - y0 + 1))
+    cidx = np.flatnonzero(cols)
+    if cidx.size == 0:
+        return None
+    return int(cidx[0]), int(y0), int(cidx[-1]) + 1, int(y1) + 1
+
+
 class Stitcher:
     """Kareleri alt alta (direction='down') veya üst üste (direction='up') birleştirir."""
 
@@ -52,6 +77,7 @@ class Stitcher:
         self.strips = []
         self.prev = None
         self.prev_gray = None
+        self.last_shift = 0
 
     def add(self, frame):
         """Dönüş: 'ok' | 'end' (aynı kare, bitti) | 'fail' (örtüşme bulunamadı)."""
@@ -74,11 +100,14 @@ class Stitcher:
         else:
             self.strips.append(frame.crop((0, h - s, frame.width, h)))
         self.prev, self.prev_gray = frame, g
+        self.last_shift = s
         return "ok"
 
+    def height(self):
+        return sum(s.height for s in self.strips)
+
     def result(self):
-        total = sum(s.height for s in self.strips)
-        out = Image.new("RGB", (self.strips[0].width, total))
+        out = Image.new("RGB", (self.strips[0].width, self.height()))
         y = 0
         for s in self.strips:
             out.paste(s, (0, y))
@@ -86,172 +115,104 @@ class Stitcher:
         return out
 
 
-# ---------- ekran işleri ----------
+def capture_window(win, progress=None, delay=0.7, max_frames=400):
+    """win = (x, y, w, h) nokta cinsinden pencere. Kaydırılan alanı bulur, en alta gidip yukarı doğru yakalar.
 
-def select_region():
-    """Tam ekran yarı saydam katman; sürükle-bırak ile dikdörtgen seç. (x, y, w, h) döner."""
-    import tkinter as tk
-
-    root = tk.Tk()
-    root.attributes("-fullscreen", True)
-    root.attributes("-topmost", True)
-    root.attributes("-alpha", 0.25)
-    root.configure(bg="black", cursor="crosshair")
-    canvas = tk.Canvas(root, bg="black", highlightthickness=0)
-    canvas.pack(fill="both", expand=True)
-    canvas.create_text(
-        root.winfo_screenwidth() // 2, 40, fill="white", font=("Helvetica", 20),
-        text="Kaydırılacak alanı sürükleyerek seç  (Esc = iptal)",
-    )
-    st = {"x0": 0, "y0": 0, "rect": None, "box": None}
-
-    def down(e):
-        st["x0"], st["y0"] = e.x_root, e.y_root
-        st["rect"] = canvas.create_rectangle(e.x, e.y, e.x, e.y, outline="red", width=3)
-
-    def move(e):
-        if st["rect"]:
-            x0, y0 = st["x0"] - root.winfo_rootx(), st["y0"] - root.winfo_rooty()
-            canvas.coords(st["rect"], x0, y0, e.x, e.y)
-
-    def up(e):
-        x1, y1 = e.x_root, e.y_root
-        x, y = min(st["x0"], x1), min(st["y0"], y1)
-        w, h = abs(x1 - st["x0"]), abs(y1 - st["y0"])
-        if w > 20 and h > 20:
-            st["box"] = (x, y, w, h)
-            root.destroy()
-
-    canvas.bind("<ButtonPress-1>", down)
-    canvas.bind("<B1-Motion>", move)
-    canvas.bind("<ButtonRelease-1>", up)
-    root.bind("<Escape>", lambda e: root.destroy())
-    root.mainloop()
-    return st["box"]
-
-
-def capture(region, direction, amount, delay, max_frames):
+    Dönüş: (PIL görüntü, ölçek). Retina'da ölçek 2.0.
+    """
     import mss
     import pyautogui
 
-    pyautogui.FAILSAFE = True  # fareyi ekran köşesine götürürsen durur
-    x, y, w, h = region
-    sign = -1 if direction == "down" else 1
-    pyautogui.moveTo(x + w // 2, y + h // 2)
-
-    def scroll(n):
-        pyautogui.scroll(sign * n)
-        time.sleep(delay)
-
+    pyautogui.FAILSAFE = True  # fareyi ekran köşesine götürürsen durur (o ana kadarki kaydedilir)
+    pyautogui.PAUSE = 0
+    x, y, w, h = win
     with mss.mss() as sct:
-        def grab():
-            shot = sct.grab({"left": x, "top": y, "width": w, "height": h})
+        def grab(r):
+            shot = sct.grab({"left": r[0], "top": r[1], "width": r[2], "height": r[3]})
             return Image.frombytes("RGB", shot.size, shot.rgb)
 
-        st = Stitcher(direction)
-        st.add(grab())
-        frames, fails = 1, 0
-        while frames < max_frames:
-            scroll(amount)
-            res = st.add(grab())
-            if res == "end":
-                print("  Sona gelindi.")
-                break
-            if res == "fail":
-                fails += 1
-                scroll(-amount)  # geri al
-                if amount == 1 or fails >= 3:
-                    print("  UYARI: kareler eşleşmedi, burada durdum (animasyon/kayan öğe olabilir).")
+        # 1) Kaydırılan alanı bul: pencereyi azıcık kaydır, değişen bölge = kaydırılan alan.
+        rect = None
+        for fx in (0.6, 0.5, 0.75, 0.4):
+            pyautogui.moveTo(x + int(w * fx), y + h // 2)
+            time.sleep(0.1)
+            for sign in (1, -1):
+                a = grab(win)
+                pyautogui.scroll(sign * 4)
+                time.sleep(delay)
+                b = grab(win)
+                box = detect_scroll_region(a, b)
+                if box:
+                    scale = a.width / w
+                    rect = (x + int(box[0] / scale), y + int(box[1] / scale),
+                            int((box[2] - box[0]) / scale), int((box[3] - box[1]) / scale))
                     break
-                amount = max(1, amount // 2)
-                print(f"  Eşleşme yok, kaydırma {amount} satıra düşürüldü.")
-                continue
-            fails = 0
-            frames += 1
-            print(f"  kare {frames}  (yükseklik {sum(s.height for s in st.strips)} px)", end="\r")
-        else:
-            print("\n  UYARI: --max-frames sınırına ulaşıldı; sayfa sonu olmayabilir.")
-        print()
-        return st.result(), w
+            if rect:
+                break
+        if rect is None:
+            raise CaptureError("Kaydırılabilir alan bulunamadı. Pencerede kaydırılan bir içerik var mı?")
+        rx, ry, rw, rh = rect
+        # Fare, kaydırılan alanın alt kısmında dursun: yukarı giderken hover araç çubuğu şeritlere girmesin.
+        pyautogui.moveTo(rx + int(rw * 0.7), ry + int(rh * 0.85))
+        time.sleep(0.1)
+
+        # 2) En alta git (zaten altaysa hemen biter).
+        prev = None
+        for _ in range(150):
+            pyautogui.scroll(-40)
+            time.sleep(0.25)
+            g = to_gray(grab(rect))
+            if prev is not None and np.abs(g - prev).mean() < 0.3:
+                break
+            prev = g
+
+        # 3) Yukarı doğru yakala.
+        st = Stitcher("up")
+        st.add(grab(rect))
+        amount, fails, frames = 6, 0, 1
+        try:
+            while frames < max_frames:
+                pyautogui.scroll(amount)
+                time.sleep(delay)
+                res = st.add(grab(rect))
+                if res == "end":  # tembel yükleme olabilir: bekle, bir daha dene
+                    time.sleep(1.5)
+                    pyautogui.scroll(amount)
+                    time.sleep(delay)
+                    res = st.add(grab(rect))
+                    if res == "end":
+                        break
+                if res == "fail":
+                    fails += 1
+                    pyautogui.scroll(-amount)
+                    if amount == 1 or fails >= 3:
+                        break
+                    amount = max(1, amount // 2)
+                    continue
+                fails = 0
+                frames += 1
+                if st.last_shift > 0:  # kayma ~ yarım kare olacak şekilde miktarı ayarla
+                    amount = max(1, min(60, round(amount * 0.5 * st.strips[-1].height / st.last_shift)))
+                if progress:
+                    progress(frames, st.height())
+        except pyautogui.FailSafeException:
+            pass
+        return st.result(), scale
 
 
-# ---------- çıktı ----------
-
-def save_outputs(img, region_w, formats, outdir, name, split):
-    os.makedirs(outdir, exist_ok=True)
-    scale = img.width / region_w  # Retina'da 2.0
-    written = []
-
-    def chunks():
-        if not split:
-            yield "", img
-            return
-        for i, top in enumerate(range(0, img.height, split), 1):
-            yield f"_{i:02d}", img.crop((0, top, img.width, min(top + split, img.height)))
-
-    for fmt in formats:
-        if fmt in ("png", "jpg"):
-            if fmt == "jpg" and img.height > 65000 and not split:
-                print("  JPG: 65000 px sınırı aşıldı, --split kullan ya da PNG/PDF seç. Atlandı.")
-                continue
-            for suffix, part in chunks():
-                path = os.path.join(outdir, f"{name}{suffix}.{fmt}")
-                if fmt == "png":
-                    part.save(path, dpi=(72 * scale, 72 * scale))
-                else:
-                    part.save(path, quality=92)
-                written.append(path)
-        elif fmt == "pdf":
-            chunk_px = int(PDF_MAX_PT * scale)
-            pages = [img.crop((0, t, img.width, min(t + chunk_px, img.height)))
-                     for t in range(0, img.height, chunk_px)]
-            path = os.path.join(outdir, f"{name}.pdf")
-            pages[0].save(path, "PDF", resolution=72 * scale, save_all=True, append_images=pages[1:])
-            written.append(path)
-            if len(pages) > 1:
-                print(f"  PDF {len(pages)} sayfaya bölündü (tek sayfa sınırı aşıldı).")
-    return written
-
-
-def ask_formats():
-    print("Çıktı biçimi:\n  1) PNG\n  2) PDF\n  3) JPG\n  4) PNG + PDF")
-    choice = input("Seçim [1]: ").strip() or "1"
-    return {"1": ["png"], "2": ["pdf"], "3": ["jpg"], "4": ["png", "pdf"]}.get(choice, ["png"])
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Kaydırmalı alanın tam ekran görüntüsü")
-    ap.add_argument("--format", help="png,pdf,jpg (virgülle birden fazla). Verilmezse sorar.")
-    ap.add_argument("--direction", choices=["down", "up"], default="down",
-                    help="down: yukarıdan aşağı (varsayılan). up: aşağıdan yukarı (Teams'te eski mesajlar için)")
-    ap.add_argument("--out", default=os.path.join(os.path.expanduser("~"), "Desktop"))
-    ap.add_argument("--name", help="dosya adı (uzantısız)")
-    ap.add_argument("--scroll", type=int, default=5, help="her adımda kaydırma miktarı (satır)")
-    ap.add_argument("--delay", type=float, default=0.8, help="kaydırmadan sonra bekleme (sn)")
-    ap.add_argument("--max-frames", type=int, default=300)
-    ap.add_argument("--split", type=int, default=0, help="PNG/JPG'yi bu piksel yükseklikte parçala (0=bölme)")
-    ap.add_argument("--region", help="x,y,w,h (verilmezse fareyle seçilir)")
-    ap.add_argument("--countdown", type=int, default=3)
-    args = ap.parse_args()
-
-    formats = [f.strip().lower().replace("jpeg", "jpg") for f in args.format.split(",")] if args.format else ask_formats()
-    if args.region:
-        region = tuple(int(v) for v in args.region.split(","))
+def export_image(img, fmt, path, scale=2.0):
+    """img'yi png/jpg/pdf olarak path'e yazar. Çok uzun PDF birkaç sayfaya bölünür."""
+    if fmt == "png":
+        img.save(path, dpi=(72 * scale, 72 * scale))
+    elif fmt == "jpg":
+        if img.height > 65000:
+            raise CaptureError("JPG en fazla 65000 px yüksekliği destekler; PNG veya PDF seç.")
+        img.convert("RGB").save(path, quality=92)
+    elif fmt == "pdf":
+        chunk = int(PDF_MAX_PT * scale)
+        pages = [img.crop((0, t, img.width, min(t + chunk, img.height))).convert("RGB")
+                 for t in range(0, img.height, chunk)]
+        pages[0].save(path, "PDF", resolution=72 * scale, save_all=True, append_images=pages[1:])
     else:
-        print("Alan seçimi açılıyor... (kaydırılacak mesaj/sayfa alanını seç; başlık ve yazma kutusunu dışarıda bırak)")
-        region = select_region()
-        if not region:
-            sys.exit("İptal edildi.")
-    print(f"Alan: {region}. {args.countdown} sn sonra başlıyor; pencereyi öne al, fareye dokunma.")
-    for i in range(args.countdown, 0, -1):
-        print(f"  {i}...", end="\r")
-        time.sleep(1)
-    img, region_w = capture(region, args.direction, args.scroll, args.delay, args.max_frames)
-    name = args.name or "scrollshot_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    for p in save_outputs(img, region_w, formats, args.out, name, args.split):
-        print("Kaydedildi:", p)
-    print(f"Boyut: {img.width}x{img.height} px")
-
-
-if __name__ == "__main__":
-    main()
+        raise ValueError(fmt)
+    return path
