@@ -55,7 +55,7 @@ assert open(os.path.join(updater.CODE, "_version.py")).read().startswith("BUILD 
 _version.BUILD = 5
 assert updater.auto_update() is None
 # 3) kabuk uyumsuz: tam indirme istenir, kod değişmez
-state.update(build=6, shell=2)
+state.update(build=6, shell=_version.SHELL + 1)
 r = updater.auto_update()
 assert r and r[0] == "full", r
 assert open(os.path.join(updater.CODE, "_version.py")).read().startswith("BUILD = 5")
