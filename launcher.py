@@ -4,7 +4,9 @@ import os
 import re
 import shutil
 import sys
+import subprocess
 import traceback
+import datetime
 
 import _version as bundled
 
@@ -75,5 +77,37 @@ def main():
     app.main()
 
 
+LOG = os.path.join(os.path.expanduser("~"), "Library", "Logs", "ScrollShot.log")
+
+
+def _log(text):
+    try:
+        os.makedirs(os.path.dirname(LOG), exist_ok=True)
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {text}\n")
+    except OSError:
+        pass
+
+
 if __name__ == "__main__":
-    main()
+    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+        try:  # pencere yok: hata çıktıları günlüğe gitsin
+            sys.stderr = open(LOG, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            pass
+    _log(f"başlıyor (sürüm {bundled.BUILD})")
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        err = traceback.format_exc()
+        _log(err)
+        short = err.strip().splitlines()[-1].replace('"', "'").replace("\\", " ")[:200]
+        try:
+            subprocess.run(["osascript", "-e",
+                            f'display dialog "ScrollShot başlatılamadı.\n\n{short}\n\nAyrıntı: ~/Library/Logs/ScrollShot.log" '
+                            'buttons {"Tamam"} with icon stop'], timeout=60)
+        except Exception:
+            pass
+        raise

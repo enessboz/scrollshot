@@ -87,6 +87,19 @@ def main():
     from AppKit import NSApplication, NSEvent, NSWorkspace
     from ApplicationServices import AXIsProcessTrusted, AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
 
+    def notify(title, subtitle, message):
+        """Bildirim hata verse bile uygulama çökmesin; olmazsa osascript'e düş."""
+        try:
+            rumps.notification(title, subtitle, message)
+        except Exception:
+            esc = lambda t: str(t).replace("\\", " ").replace('"', "'")
+            try:
+                subprocess.run(["osascript", "-e",
+                                f'display notification "{esc(message)}" with title "{esc(title)}" subtitle "{esc(subtitle)}"'],
+                               timeout=5)
+            except Exception:
+                pass
+
     key_mask = getattr(AppKit, "NSEventMaskKeyDown", 1 << 10)
     ctrl = getattr(AppKit, "NSEventModifierFlagControl", 1 << 18)
     opt = getattr(AppKit, "NSEventModifierFlagOption", 1 << 19)
@@ -133,10 +146,10 @@ def main():
                 Quartz.CGRequestScreenCaptureAccess()
             AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: True})
             if update_result and update_result[0] == "full":
-                rumps.notification("ScrollShot", "Yeni sürüm var",
+                notify("ScrollShot", "Yeni sürüm var",
                                    "Uygulamayı bir kez yeniden indirmen gerekiyor: " + update_result[1])
             else:
-                rumps.notification("ScrollShot", f"Menü çubuğunda ({HOTKEY_LABEL})",
+                notify("ScrollShot", f"Menü çubuğunda ({HOTKEY_LABEL})",
                                    f"Bir pencerede {HOTKEY_LABEL} tuşlarına bas, tam sayfa yakalasın.")
 
         # ---- kısayol ----
@@ -159,7 +172,7 @@ def main():
                 return
             self.job, self.title = None, "📸"
             if job["error"]:
-                rumps.notification("ScrollShot", "Yakalanamadı", job["error"])
+                notify("ScrollShot", "Yakalanamadı", job["error"])
                 return
             self.after_capture(job["entry"])
 
@@ -168,18 +181,18 @@ def main():
             if self.job:
                 return
             if not AXIsProcessTrusted():
-                rumps.notification("ScrollShot", "İzin gerekli",
+                notify("ScrollShot", "İzin gerekli",
                                    "Erişilebilirlik iznini ver (Sistem Ayarları → Gizlilik ve Güvenlik).")
                 return
             if not Quartz.CGPreflightScreenCaptureAccess():
                 Quartz.CGRequestScreenCaptureAccess()
-                rumps.notification("ScrollShot", "İzin gerekli", "Ekran Kaydı iznini ver, sonra ScrollShot'ı kapatıp aç.")
+                notify("ScrollShot", "İzin gerekli", "Ekran Kaydı iznini ver, sonra ScrollShot'ı kapatıp aç.")
                 return
             win = front_window()
             if not win:
-                rumps.notification("ScrollShot", "Pencere bulunamadı", "Yakalanacak pencereyi öne alıp tekrar dene.")
+                notify("ScrollShot", "Pencere bulunamadı", "Yakalanacak pencereyi öne alıp tekrar dene.")
                 return
-            rumps.notification("ScrollShot", win["title"], "Yakalanıyor. Bitene kadar fareye dokunma.")
+            notify("ScrollShot", win["title"], "Yakalanıyor. Bitene kadar fareye dokunma.")
             job = {"frames": 0, "done": False, "error": None, "entry": None}
             self.job = job
 
@@ -238,7 +251,7 @@ def main():
             try:
                 subprocess.run(["open", "-R", export(entry, fmt)])
             except Exception as e:
-                rumps.notification("ScrollShot", "Kaydedilemedi", str(e))
+                notify("ScrollShot", "Kaydedilemedi", str(e))
 
     ScrollShot().run()
 
