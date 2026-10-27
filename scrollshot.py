@@ -17,21 +17,27 @@ def to_gray(img, col_step=4):
     return np.asarray(img.convert("L"), dtype=np.int16)[:, ::col_step]
 
 
-def find_shift(prev, new, min_overlap_frac=0.15, tol=4.0):
+def find_shift(prev, new, min_overlap_frac=0.1, tol=6.0, margin=0.1, diag=None):
     """prev ve new aynı boyutlu gri diziler; içerik s satır yukarı kaymış: prev[s:] == new[:h-s].
 
+    Üst/alt `margin` kadar satır karşılaştırmadan çıkarılır (kayan alanın üstünde duran 'Dün/Bugün' etiketi gibi sabit öğeler).
     Dönüş: 0 = kareler aynı (kaydırma bitti), s>0 = kayma miktarı, None = eşleşme yok.
+    diag: verilirse {'best','median','shift'} yazılır (günlük için).
     """
     h = prev.shape[0]
     if np.abs(prev - new).mean() < 0.3:
         return 0
-    min_ov = max(int(h * min_overlap_frac), 16)
-    if h - min_ov < 1:
+    m = int(h * margin)
+    min_len = max(int(h * min_overlap_frac), 16)
+    smax = h - 2 * m - min_len
+    if smax < 1:
         return None
-    d = np.empty(h - min_ov, dtype=np.float64)
-    for s in range(1, h - min_ov + 1):
-        d[s - 1] = np.abs(prev[s:] - new[: h - s]).mean()
+    d = np.empty(smax, dtype=np.float64)
+    for s in range(1, smax + 1):
+        d[s - 1] = np.abs(prev[s + m:h - m] - new[m:h - m - s]).mean()
     i = int(d.argmin())
+    if diag is not None:
+        diag.update(best=float(d[i]), median=float(np.median(d)), shift=i + 1)
     # Hem mutlak olarak düşük hem de diğer kaymalardan belirgin ayrışmalı.
     if d[i] < tol and d[i] < 0.5 * float(np.median(d)):
         return i + 1
@@ -78,6 +84,7 @@ class Stitcher:
         self.prev = None
         self.prev_gray = None
         self.last_shift = 0
+        self.diag = {}
 
     def add(self, frame):
         """Dönüş: 'ok' | 'end' (aynı kare, bitti) | 'fail' (örtüşme bulunamadı)."""
@@ -88,9 +95,9 @@ class Stitcher:
             return "ok"
         h = frame.height
         if self.up:
-            s = find_shift(self.prev_gray[::-1], g[::-1])
+            s = find_shift(self.prev_gray[::-1], g[::-1], diag=self.diag)
         else:
-            s = find_shift(self.prev_gray, g)
+            s = find_shift(self.prev_gray, g, diag=self.diag)
         if s == 0:
             return "end"
         if s is None:
@@ -118,7 +125,7 @@ class Stitcher:
 def capture_window(win, progress=None, delay=0.7, max_frames=400):
     """win = (x, y, w, h) nokta cinsinden pencere. Kaydırılan alanı bulur, en alta gidip yukarı doğru yakalar.
 
-    Dönüş: (PIL görüntü, ölçek). Retina'da ölçek 2.0.
+    Dönüş: (PIL görüntü, ölçek, info). info = kare sayısı, durma nedeni (end/fail/max/failsafe), ayrıntılı günlük.
     """
     import mss
     import pyautogui
@@ -169,35 +176,43 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400):
         # 3) Yukarı doğru yakala.
         st = Stitcher("up")
         st.add(grab(rect))
-        amount, fails, frames = 6, 0, 1
+        amount, fails, frames = 4, 0, 1
+        stop = "max"
+        log = [f"pencere={win} alan={rect} ölçek={scale:.1f}"]
         try:
             while frames < max_frames:
                 pyautogui.scroll(amount)
                 time.sleep(delay)
                 res = st.add(grab(rect))
+                log.append(f"kaydır={amount} sonuç={res} kayma={st.last_shift} tanı={st.diag}")
                 if res == "end":  # tembel yükleme olabilir: bekle, bir daha dene
                     time.sleep(1.5)
                     pyautogui.scroll(amount)
                     time.sleep(delay)
                     res = st.add(grab(rect))
+                    log.append(f"  yeniden: sonuç={res}")
                     if res == "end":
+                        stop = "end"
                         break
                 if res == "fail":
                     fails += 1
                     pyautogui.scroll(-amount)
-                    if amount == 1 or fails >= 3:
+                    time.sleep(delay)
+                    if amount == 1 or fails >= 4:
+                        stop = "fail"
                         break
                     amount = max(1, amount // 2)
                     continue
                 fails = 0
                 frames += 1
                 if st.last_shift > 0:  # kayma ~ yarım kare olacak şekilde miktarı ayarla
-                    amount = max(1, min(60, round(amount * 0.5 * st.strips[-1].height / st.last_shift)))
+                    amount = max(1, min(60, round(amount * 0.45 * st.strips[-1].height / st.last_shift)))
                 if progress:
                     progress(frames, st.height())
         except pyautogui.FailSafeException:
-            pass
-        return st.result(), scale
+            stop = "failsafe"
+        info = {"frames": frames, "stop": stop, "log": log}
+        return st.result(), scale, info
 
 
 def export_image(img, fmt, path, scale=2.0):

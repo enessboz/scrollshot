@@ -31,6 +31,28 @@ def safe_name(title):
     return (t or "ScrollShot")[:80]
 
 
+STOP_TEXT = {"end": "en üste kadar gidildi", "fail": "DURDU: kareler eşleşmedi (üst kısım eksik olabilir)",
+             "max": "DURDU: kare sınırına ulaşıldı", "failsafe": "elle durduruldu"}
+
+
+def stop_text(info):
+    if not info:
+        return ""
+    return f'{info["frames"]} kare, {STOP_TEXT.get(info["stop"], info["stop"])}'
+
+
+def log_capture(title, info):
+    """Ayrıntıyı ~/Library/Logs/ScrollShot.log dosyasına yazar (sorun gidermek için)."""
+    try:
+        path = os.path.join(os.path.expanduser("~"), "Library", "Logs", "ScrollShot.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] yakalama '{title}': {stop_text(info)}\n")
+            for line in info["log"][-60:]:
+                f.write("   " + line + "\n")
+    except OSError:
+        pass
+
+
 def load_history():
     try:
         with open(HIST, encoding="utf-8") as f:
@@ -174,7 +196,7 @@ def main():
             if job["error"]:
                 notify("ScrollShot", "Yakalanamadı", job["error"])
                 return
-            self.after_capture(job["entry"])
+            self.after_capture(job["entry"], job.get("info"))
 
         # ---- yakalama ----
         def trigger(self):
@@ -205,8 +227,10 @@ def main():
                     while NSEvent.modifierFlags() & (ctrl | opt | cmd | shift) and time.time() < deadline:
                         time.sleep(0.05)
                     time.sleep(0.3)
-                    img, scale = ss.capture_window(win["rect"], progress)
+                    img, scale, info = ss.capture_window(win["rect"], progress)
                     job["entry"] = store(img, scale, win["title"], win["app"])
+                    job["info"] = info
+                    log_capture(win["title"], info)
                 except Exception as e:
                     job["error"] = str(e) or type(e).__name__
                 finally:
@@ -214,12 +238,12 @@ def main():
 
             threading.Thread(target=work, daemon=True).start()
 
-        def after_capture(self, entry):
+        def after_capture(self, entry, info=None):
             self.refresh_history()
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
             w, h = entry["size"]
             r = rumps.alert(title="Yakalandı",
-                            message=f'{entry["title"]}\n{w}×{h} px\n\nHangi biçimde masaüstüne kaydedeyim?',
+                            message=f'{entry["title"]}\n{w}×{h} px  ·  {stop_text(info)}\n\nHangi biçimde masaüstüne kaydedeyim?',
                             ok="PNG", cancel="Şimdilik sakla", other="PDF")
             if r == 1:
                 self.export_and_show(entry, "png")

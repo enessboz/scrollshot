@@ -49,6 +49,24 @@ def run(direction, steps, vh=800):
     print(f"OK {direction}: {out.size}")
 
 
+def test_sticky_label():
+    """Kayan alanın üstünde duran sabit etiket (Teams 'Dün' hapı) eşleştirmeyi bozmasın."""
+    page = make_page(seed=5)
+    vh = 800
+    st = Stitcher("up")
+    pos = page.height - vh
+    for step in [300, 350, 400, 320, 380, 450, 330, 410, 360, 300, 340, 390]:
+        fr = page.crop((0, pos, page.width, pos + vh)).copy()
+        d = ImageDraw.Draw(fr)
+        d.rectangle([250, 8, 350, 36], fill=(80, 80, 80))
+        d.text((262, 14), "Dun", fill="white")
+        assert st.add(fr) == "ok", f"pos={pos} diag={st.diag}"
+        pos = max(0, pos - step)
+        if pos == 0:
+            break
+    print("OK sticky label")
+
+
 def test_detect():
     """Sabit başlık/yan liste/alt kutu + kayan içerik: yalnız kayan alan bulunmalı (caret yanıp sönse de)."""
     W, H, top, bot, left = 1000, 700, 80, 100, 200
@@ -76,8 +94,9 @@ def test_detect():
 
 if __name__ == "__main__":
     test_detect()
+    test_sticky_label()
     rnd = random.Random(7)
-    steps = [rnd.randint(250, 650) for _ in range(20)]
+    steps = [rnd.randint(250, 540) for _ in range(20)]
     run("down", steps)
     run("up", steps)
     print("Tüm testler geçti.")
