@@ -228,7 +228,10 @@ def main():
 
         # ---- geçmiş ----
         def refresh_history(self):
-            self.history_item.clear()
+            try:
+                self.history_item.clear()
+            except AttributeError:  # alt menü henüz oluşmadıysa (ilk kurulum) temizlenecek bir şey yok
+                pass
             items = load_history()[-MAX_MENU:][::-1]
             if not items:
                 self.history_item.add(rumps.MenuItem("(henüz yok)"))
