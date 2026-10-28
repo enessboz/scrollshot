@@ -39,7 +39,8 @@ def stop_text(info):
     if not info:
         return ""
     secs = f' · {info["seconds"]:.0f} sn' if info.get("seconds") else ""
-    return f'{info["frames"]} kare, {STOP_TEXT.get(info["stop"], info["stop"])}{secs}'
+    note = f' · {info["note"]}' if info.get("note") else ""
+    return f'{info["frames"]} kare, {STOP_TEXT.get(info["stop"], info["stop"])}{secs}{note}'
 
 
 def log_capture(title, info):
@@ -82,14 +83,16 @@ def store(img, scale, title, app_name):
     return entry
 
 
-def export(entry, fmt):
-    """Geçmişteki bir kaydı masaüstüne seçilen biçimde yazar; dosya yolunu döner."""
+def export(entry, fmt, dest=None):
+    """Geçmişteki bir kaydı seçilen klasöre (varsayılan: DESKTOP) seçilen biçimde yazar; dosya yolunu döner."""
+    DEST = dest or DESKTOP
     master = os.path.join(LIB, entry["file"])
     base = f'{safe_name(entry["title"])} {entry["stamp"][:16]}'  # "Başlık 2026-10-27 18.40"
-    path = os.path.join(DESKTOP, f"{base}.{fmt}")
+    os.makedirs(DEST, exist_ok=True)
+    path = os.path.join(DEST, f"{base}.{fmt}")
     n = 2
     while os.path.exists(path):
-        path = os.path.join(DESKTOP, f"{base} ({n}).{fmt}")
+        path = os.path.join(DEST, f"{base} ({n}).{fmt}")
         n += 1
     if fmt == "png":
         shutil.copyfile(master, path)
@@ -97,6 +100,65 @@ def export(entry, fmt):
         with Image.open(master) as im:
             ss.export_image(im.convert("RGB"), fmt, path, entry.get("scale", 2.0))
     return path
+
+
+def export_as(entry, path):
+    """Kaydı tam verilen dosya yoluna yazar; biçim uzantıdan anlaşılır (png/jpg/pdf)."""
+    fmt = os.path.splitext(path)[1].lower().lstrip(".").replace("jpeg", "jpg")
+    if fmt not in ("png", "jpg", "pdf"):
+        raise ValueError("Uzantı .png, .jpg veya .pdf olmalı")
+    master = os.path.join(LIB, entry["file"])
+    if fmt == "png":
+        shutil.copyfile(master, path)
+    else:
+        with Image.open(master) as im:
+            ss.export_image(im.convert("RGB"), fmt, path, entry.get("scale", 2.0))
+    return path
+
+
+def delete_entry(entry):
+    """Geçmişten ve diskten (ana PNG) siler."""
+    try:
+        os.remove(os.path.join(LIB, entry["file"]))
+    except OSError:
+        pass
+    save_history([e for e in load_history() if e["file"] != entry["file"]])
+
+
+def import_file(path):
+    """Dışarıdaki bir resmi (png/jpg/webp/bmp) ya da PDF'i geçmişe ekler; yeni kaydı döner.
+    PDF için PyMuPDF gerekir (yoksa ValueError)."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".pdf":
+        try:
+            import pymupdf as fitz
+        except ImportError:
+            try:
+                import fitz
+            except ImportError:
+                raise ValueError("PDF içe aktarma bu kurulumda yok; yeni sürümü yeniden indirip kur.")
+        pages = []
+        with fitz.open(path) as doc:
+            for pg in doc:
+                pix = pg.get_pixmap(matrix=fitz.Matrix(2, 2))
+                pages.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+        if not pages:
+            raise ValueError("PDF boş")
+        w = max(p.width for p in pages)
+        img = Image.new("RGB", (w, sum(p.height for p in pages)), "white")
+        y = 0
+        for p in pages:
+            img.paste(p, (0, y))
+            y += p.height
+        scale = 2.0
+    elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        with Image.open(path) as im:
+            img = im.convert("RGB")
+        scale = 1.0
+    else:
+        raise ValueError(f"Desteklenmeyen dosya türü: {ext or '?'}")
+    return store(img, scale, name, "İçe aktarılan")
 
 
 def main():

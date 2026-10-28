@@ -126,6 +126,28 @@ HIDE_JS = """(() => {
   return n;
 })()"""
 
+# Kayan alandaki mesajların zaman damgaları: <time datetime>, Slack'in data-ts'i, data-timestamp. y = mesajın içerikteki üst konumu.
+TIMES_JS = """(() => {
+  const el = document.querySelector('[data-ss-target]');
+  if (!el) return [];
+  const isDoc = el === document.scrollingElement;
+  const base = isDoc ? 0 : el.getBoundingClientRect().top;
+  const cur = isDoc ? window.pageYOffset : el.scrollTop;
+  const out = [];
+  el.querySelectorAll('time[datetime], [data-ts], [data-timestamp]').forEach(n => {
+    let t = NaN;
+    if (n.hasAttribute('datetime')) t = Date.parse(n.getAttribute('datetime'));
+    else if (n.hasAttribute('data-ts')) t = parseFloat(n.getAttribute('data-ts')) * 1000;
+    else t = parseFloat(n.getAttribute('data-timestamp'));
+    if (!isFinite(t)) return;
+    if (t < 1e11) t *= 1000;
+    const box = n.closest('[data-ss-msg],[data-tid="chat-pane-message"],[role="listitem"],li,article,[data-qa="message_container"]');
+    const r = (box || n).getBoundingClientRect();
+    out.push({t: t, y: cur + r.top - base + (box ? 0 : -12)});
+  });
+  return out;
+})()"""
+
 RESTORE_JS = """(() => {
   document.querySelectorAll('[data-ss-hide]').forEach(c => {
     const v = c.getAttribute('data-ss-hide');
@@ -157,6 +179,13 @@ def _settle(c, quiet=0.12, maxwait=2.5):
             return st
         time.sleep(0.05)
     return _state(c)
+
+
+def _times(c):
+    try:
+        return c.eval(TIMES_JS) or []
+    except CDPError:
+        return []
 
 
 def _scroll_to(c, y):
@@ -204,11 +233,13 @@ def pick_target(port, title_hint=""):
     return best
 
 
-def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, preload_seconds=240):
-    """Seçilen sayfadaki kayan alanı önce en üste çıkıp (tüm içerik yüklensin), sonra yukarıdan aşağıya yakalar. (img, piksel/css ölçeği, info) döner."""
+def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, preload_seconds=240, since_ms=None):
+    """Seçilen sayfadaki kayan alanı önce en üste çıkıp (tüm içerik yüklensin), sonra yukarıdan aşağıya yakalar.
+    since_ms verilirse (epoch ms) yalnız o tarihten itibarenki mesajlar alınır (Teams/Slack zaman damgalarından). (img, piksel/css ölçeği, info) döner."""
     c = CDP(ws_url)
     log = []
     started = time.time()
+    note = ""
     try:
         found = c.eval(FIND_JS % "true")
         if not found or not found.get("found"):
@@ -230,6 +261,10 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
                 if _state(c)["height"] != last_h:
                     break
             st = _settle(c)
+            if since_ms:  # tarih sınırından eski bir mesaj yüklendiyse yeter
+                ts = _times(c)
+                if ts and min(x["t"] for x in ts) <= since_ms:
+                    break
             if st["top"] <= 0.5 and st["height"] == last_h:
                 stable += 1
                 if stable >= 2:
@@ -238,6 +273,21 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
                 stable = 0
             last_h = st["height"]
         log.append(f"üste çıkış: {time.time() - t0:.0f} sn, yükseklik={st['height']}, kararlı={stable >= 2}")
+        if since_ms:
+            ts = _times(c)
+            log.append(f"zaman damgası sayısı={len(ts)}")
+            if not ts:
+                note = "tarih bulunamadı, tamamı alındı"
+            else:
+                after = [x for x in ts if x["t"] >= since_ms]
+                if not after:
+                    note = "sınırdan yeni mesaj yok, tamamı alındı"
+                else:
+                    first = min(after, key=lambda x: x["y"])
+                    if min(x["t"] for x in ts) > since_ms:
+                        note = "sınırdan eski mesaj yok, tamamı alındı"
+                    st = _scroll_to(c, max(0, first["y"] - 4))
+                    log.append(f"başlangıç: y={first['y']:.0f} (sınırdan sonraki ilk mesaj)")
 
         # 2) Yukarıdan aşağıya yakala.
         img = _shot(c, st)
@@ -274,7 +324,8 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
             if stitch.height() > max_height_px:
                 stop = "max"
                 break
-        return stitch.result(), ppc, {"frames": frames, "stop": stop, "log": log, "seconds": time.time() - started}
+        return stitch.result(), ppc, {"frames": frames, "stop": stop, "log": log, "seconds": time.time() - started,
+                                      "note": note}
     finally:
         try:
             c.eval(RESTORE_JS)

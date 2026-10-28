@@ -17,6 +17,9 @@ import scrollshot as ss
 import updater
 
 HOTKEY_LABEL = "Ctrl+Alt+S"
+SINCE_CHOICES = [("Sınırsız", None), ("Son 1 gün", "days:1"), ("Son 3 gün", "days:3"), ("Son 7 gün", "days:7"),
+                 ("Son 14 gün", "days:14"), ("Son 30 gün", "days:30")]
+FORMAT_CHOICES = [("Her seferinde sor", "ask"), ("PNG", "png"), ("PDF", "pdf"), ("PNG + PDF", "png+pdf")]
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 HOME = os.path.join(APPDATA, "ScrollShot")
 LOG = os.path.join(HOME, "ScrollShot.log")
@@ -217,6 +220,43 @@ def relaunch_in_capture_mode(name, port, exe_path):
     return None
 
 
+# ---------------- Ayar yardımcıları ----------------
+
+def since_ms(spec):
+    """'days:N' (N gün öncesinin 00:00'ı) ya da 'date:YYYY-MM-DD' -> epoch ms; None = sınırsız."""
+    if not spec:
+        return None
+    try:
+        kind, val = spec.split(":", 1)
+        if kind == "days":
+            d = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) - datetime.timedelta(days=int(val))
+        else:
+            d = datetime.datetime.strptime(val, "%Y-%m-%d")
+        return int(d.timestamp() * 1000)
+    except (ValueError, OSError):
+        return None
+
+
+def since_label(spec):
+    for label, v in SINCE_CHOICES:
+        if v == spec:
+            return label
+    if spec and spec.startswith("date:"):
+        try:
+            return datetime.datetime.strptime(spec[5:], "%Y-%m-%d").strftime("%d.%m.%Y") + " ve sonrası"
+        except ValueError:
+            pass
+    return "Sınırsız"
+
+
+def pretty_stamp(stamp):
+    """'2026-10-28 10.07.12' -> '28.10.2026 10:07'"""
+    try:
+        return datetime.datetime.strptime(stamp, "%Y-%m-%d %H.%M.%S").strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return stamp
+
+
 # ---------------- Uygulama ----------------
 
 def main():
@@ -230,7 +270,7 @@ def main():
         return
 
     import tkinter as tk
-    from tkinter import messagebox
+    from tkinter import filedialog, messagebox, simpledialog, ttk
 
     import pystray
     from PIL import Image, ImageDraw
@@ -238,9 +278,10 @@ def main():
     import cdp
 
     common.LIB = os.path.join(known_folder("{33E28130-4E1E-4676-835A-98395C3BC3BB}", os.path.expanduser("~\\Pictures")), "ScrollShot")
-    common.DESKTOP = known_folder("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}", os.path.expanduser("~\\Desktop"))
+    default_dir = known_folder("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}", os.path.expanduser("~\\Desktop"))
     common.HIST = os.path.join(common.LIB, "history.json")
     settings = load_settings()
+    common.DESKTOP = settings.get("save_dir") or default_dir  # dışa aktarma hedef klasörü
     q = queue.Queue()
     state = {"busy": False, "frames": 0, "what": ""}
 
@@ -288,12 +329,58 @@ def main():
         else:
             status_win["l"].config(text=text)
 
+    def toast(text, secs=4000):
+        show_status(text)
+        root.after(secs, lambda: show_status(None) if not state["busy"] else None)
+
+    def reveal(path):
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+
+    def export_and_show(entry, fmt):
+        try:
+            path = common.export(entry, fmt)
+            reveal(path)
+            return path
+        except Exception as e:
+            log(f"dışa aktarma hatası: {e}")
+            messagebox.showerror("ScrollShot", f"Kaydedilemedi: {e}")
+
+    # --- menü ---
+    def set_setting(key, value):
+        settings[key] = value
+        save_settings(settings)
+        if key == "save_dir":
+            common.DESKTOP = value or default_dir
+        icon.update_menu()
+
+    def short_dir():
+        p = common.DESKTOP
+        return p if len(p) <= 38 else p[:15] + "…" + p[-22:]
+
+    def radio_menu(choices, key, default):
+        return pystray.Menu(*[
+            pystray.MenuItem(label, (lambda v: lambda: q.put(("set", key, v)))(val),
+                             checked=(lambda v: lambda item: settings.get(key, default) == v)(val), radio=True)
+            for label, val in choices])
+
+    since_menu_items = [
+        pystray.MenuItem(label, (lambda v: lambda: q.put(("set", "since", v)))(val),
+                         checked=(lambda v: lambda item: settings.get("since") == v)(val), radio=True)
+        for label, val in SINCE_CHOICES]
+    since_menu_items.append(pystray.MenuItem(
+        "Belirli bir tarihten itibaren...", lambda: q.put(("custom_date",)),
+        checked=lambda item: bool((settings.get("since") or "").startswith("date:")), radio=True))
+
     menu = pystray.Menu(
         pystray.MenuItem(f"Öndeki pencereyi yakala   {HOTKEY_LABEL}", lambda: q.put(("capture",)), default=True),
-        pystray.MenuItem("Geçmiş...", lambda: q.put(("history",))),
+        pystray.MenuItem("Pano...", lambda: q.put(("panel",))),
+        pystray.MenuItem(lambda item: f"Tarih sınırı: {since_label(settings.get('since'))}", pystray.Menu(*since_menu_items)),
+        pystray.MenuItem(lambda item: f"Kaydetme klasörü: {short_dir()}", lambda: q.put(("pick_dir",))),
+        pystray.MenuItem("Biçim", radio_menu(FORMAT_CHOICES, "format", "ask")),
+        pystray.MenuItem("Dosya ekle...", lambda: q.put(("import",))),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem("Windows ile başlat", lambda: q.put(("autostart",)), checked=lambda _: autostart_enabled()),
         pystray.MenuItem("Günlüğü aç", lambda: os.startfile(LOG) if os.path.exists(LOG) else None),
-        pystray.Menu.SEPARATOR,
         pystray.MenuItem(f"Sürüm {_version.BUILD}", lambda: None, enabled=False),
         pystray.MenuItem("Çıkış", lambda: q.put(("quit",))),
     )
@@ -301,7 +388,27 @@ def main():
     icon.run_detached()
     threading.Thread(target=hotkey_loop, args=(q,), daemon=True).start()
 
-    # --- pencereler ---
+    # --- ayar pencereleri ---
+    def pick_dir():
+        p = filedialog.askdirectory(title="Yakalamaların kaydedileceği klasör", initialdir=common.DESKTOP, parent=root)
+        if p:
+            set_setting("save_dir", os.path.normpath(p))
+            toast("Kaydetme klasörü: " + short_dir())
+            return True
+        return False
+
+    def custom_date():
+        txt = simpledialog.askstring("Tarih sınırı", "Bu tarihten itibaren yakala (GG.AA.YYYY):", parent=root)
+        if not txt:
+            return
+        try:
+            dt = datetime.datetime.strptime(txt.strip(), "%d.%m.%Y")
+        except ValueError:
+            alert("Tarih anlaşılamadı. Örnek: 21.10.2026", error=True)
+            return
+        set_setting("since", "date:" + dt.strftime("%Y-%m-%d"))
+
+    # --- yakalama sonrası: sor ya da otomatik kaydet ---
     def ask_format(entry, info):
         top = tk.Toplevel(root)
         top.title("ScrollShot")
@@ -310,8 +417,8 @@ def main():
         tk.Label(top, text="Yakalandı", font=("Segoe UI", 13, "bold")).pack(padx=24, pady=(16, 2))
         tk.Label(top, text=entry["title"][:70], wraplength=360).pack(padx=24)
         w, h = entry["size"]
-        tk.Label(top, text=f"{w}×{h} px  ·  {common.stop_text(info)}", fg="gray").pack(padx=24, pady=(2, 10))
-        tk.Label(top, text="Hangi biçimde masaüstüne kaydedeyim?").pack()
+        tk.Label(top, text=f"{w}×{h} px  ·  {common.stop_text(info)}", fg="gray", wraplength=360).pack(padx=24, pady=(2, 10))
+        tk.Label(top, text="Hangi biçimde kaydedeyim?\n" + short_dir()).pack()
         row = tk.Frame(top)
         row.pack(pady=14)
 
@@ -325,34 +432,153 @@ def main():
         top.geometry(f"+{(top.winfo_screenwidth() - top.winfo_width()) // 2}+{(top.winfo_screenheight() - top.winfo_height()) // 3}")
         top.focus_force()
 
-    def export_and_show(entry, fmt):
-        try:
-            path = common.export(entry, fmt)
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
-        except Exception as e:
-            log(f"dışa aktarma hatası: {e}")
-            messagebox.showerror("ScrollShot", f"Kaydedilemedi: {e}")
+    def after_capture(entry, info):
+        fmt = settings.get("format", "ask")
+        if fmt == "ask":
+            ask_format(entry, info)
+            return
+        paths = []
+        for f in fmt.split("+"):
+            try:
+                paths.append(common.export(entry, f))
+            except Exception as e:
+                log(f"otomatik kaydetme hatası ({f}): {e}")
+                alert(f"Kaydedilemedi ({f}): {e}", error=True)
+        if paths:
+            toast("Kaydedildi: " + ", ".join(os.path.basename(p) for p in paths)[:90], 6000)
+            reveal(paths[0])
 
-    def history_window():
-        items = common.load_history()[::-1]
+    # --- pano ---
+    panel = {"w": None}
+
+    def panel_window():
+        if panel["w"] is not None:
+            try:
+                panel["w"].deiconify()
+                panel["w"].lift()
+                return
+            except tk.TclError:
+                panel["w"] = None
         top = tk.Toplevel(root)
-        top.title("ScrollShot geçmişi")
-        top.attributes("-topmost", True)
-        lb = tk.Listbox(top, width=70, height=14)
-        lb.pack(padx=10, pady=10)
-        for e in items:
-            lb.insert("end", f'{e["stamp"][:16].replace(".", ":")}   {e["title"][:55]}')
+        panel["w"] = top
+        top.title("ScrollShot Pano")
+        top.geometry("900x520")
+        top.protocol("WM_DELETE_WINDOW", lambda: (top.destroy(), panel.update(w=None)))
+        info = tk.Label(top, anchor="w", fg="gray")
+        info.pack(fill="x", padx=10, pady=(8, 0))
+        cols = ("tarih", "baslik", "uygulama", "boyut")
+        frame = tk.Frame(top)
+        frame.pack(fill="both", expand=True, padx=10, pady=8)
+        tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
+        for c, label, wd in (("tarih", "Tarih", 130), ("baslik", "Başlık", 470), ("uygulama", "Uygulama", 110), ("boyut", "Boyut", 100)):
+            tree.heading(c, text=label)
+            tree.column(c, width=wd, anchor="w")
+        sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        items = []
+
+        def refresh():
+            items[:] = common.load_history()[::-1]
+            tree.delete(*tree.get_children())
+            for i, e in enumerate(items):
+                w, h = e["size"]
+                tree.insert("", "end", iid=str(i), values=(pretty_stamp(e["stamp"]), e["title"], e.get("app", ""), f"{w}×{h}"))
+            info.config(text=f"{len(items)} kayıt  ·  Kaydetme klasörü: {common.DESKTOP}")
+
+        def selected():
+            return [items[int(i)] for i in tree.selection()]
+
+        def convert(fmt):
+            sel = selected()
+            if not sel:
+                messagebox.showinfo("ScrollShot", "Önce listeden bir veya birkaç kayıt seç.", parent=top)
+                return
+            last = None
+            for e in sel:
+                try:
+                    last = common.export(e, fmt)
+                except Exception as err:
+                    messagebox.showerror("ScrollShot", f"{e['title'][:40]}: {err}", parent=top)
+            if last:
+                toast(f"{len(sel)} kayıt {fmt.upper()} olarak kaydedildi")
+                reveal(last)
+
+        def save_as():
+            sel = selected()
+            if len(sel) != 1:
+                messagebox.showinfo("ScrollShot", "Farklı kaydet için tek bir kayıt seç.", parent=top)
+                return
+            e = sel[0]
+            p = filedialog.asksaveasfilename(parent=top, title="Farklı kaydet", initialdir=common.DESKTOP,
+                                             initialfile=common.safe_name(e["title"]), defaultextension=".pdf",
+                                             filetypes=[("PDF", "*.pdf"), ("PNG", "*.png"), ("JPG", "*.jpg")])
+            if p:
+                try:
+                    reveal(common.export_as(e, p))
+                except Exception as err:
+                    messagebox.showerror("ScrollShot", str(err), parent=top)
+
+        def open_sel(_=None):
+            for e in selected()[:1]:
+                os.startfile(os.path.join(common.LIB, e["file"]))
+
+        def reveal_sel():
+            for e in selected()[:1]:
+                reveal(os.path.join(common.LIB, e["file"]))
+
+        def delete_sel():
+            sel = selected()
+            if sel and messagebox.askyesno("ScrollShot", f"{len(sel)} kayıt silinsin mi?\n(Masaüstüne/klasöre daha önce kaydedilen dosyalar silinmez.)", parent=top):
+                for e in sel:
+                    common.delete_entry(e)
+                refresh()
+
+        def add_files():
+            paths = filedialog.askopenfilenames(parent=top, title="Panoya dosya ekle",
+                                                filetypes=[("Resim / PDF", "*.png *.jpg *.jpeg *.webp *.bmp *.pdf")])
+            errs = []
+            for p in paths:
+                try:
+                    common.import_file(p)
+                except Exception as err:
+                    errs.append(f"{os.path.basename(p)}: {err}")
+            if errs:
+                messagebox.showerror("ScrollShot", "\n".join(errs), parent=top)
+            refresh()
+
+        def change_dir():
+            if pick_dir():
+                refresh()
+
         row = tk.Frame(top)
-        row.pack(pady=(0, 10))
+        row.pack(fill="x", padx=10, pady=(0, 10))
+        for label, fn in (("PNG'ye çevir", lambda: convert("png")), ("PDF'e çevir", lambda: convert("pdf")),
+                          ("JPG'ye çevir", lambda: convert("jpg")), ("Farklı kaydet...", save_as)):
+            tk.Button(row, text=label, command=fn).pack(side="left", padx=3)
+        tk.Button(row, text="Dosya ekle...", command=add_files).pack(side="left", padx=(16, 3))
+        tk.Button(row, text="Klasör değiştir...", command=change_dir).pack(side="left", padx=3)
+        for label, fn in (("Sil", delete_sel), ("Klasörde göster", reveal_sel), ("Aç", open_sel)):
+            tk.Button(row, text=label, command=fn).pack(side="right", padx=3)
+        tree.bind("<Double-1>", open_sel)
+        top.refresh = refresh
+        refresh()
 
-        def sel():
-            i = lb.curselection()
-            return items[i[0]] if i else None
-
-        for fmt in ("png", "pdf", "jpg"):
-            tk.Button(row, text=f"{fmt.upper()} olarak masaüstüne", command=lambda f=fmt: sel() and export_and_show(sel(), f)).pack(side="left", padx=4)
-        tk.Button(row, text="Klasörde göster", command=lambda: sel() and subprocess.Popen(
-            ["explorer", "/select,", os.path.normpath(os.path.join(common.LIB, sel()["file"]))])).pack(side="left", padx=4)
+    def import_dialog():
+        paths = filedialog.askopenfilenames(parent=root, title="Panoya dosya ekle",
+                                            filetypes=[("Resim / PDF", "*.png *.jpg *.jpeg *.webp *.bmp *.pdf")])
+        errs = []
+        for p in paths:
+            try:
+                common.import_file(p)
+            except Exception as err:
+                errs.append(f"{os.path.basename(p)}: {err}")
+        if errs:
+            alert("\n".join(errs), error=True)
+        elif paths:
+            toast(f"{len(paths)} dosya panoya eklendi")
+        panel_window()
 
     # --- yakalama ---
     def finish(result):
@@ -363,9 +589,14 @@ def main():
             log("yakalama hatası: " + result["error"])
             alert("Yakalanamadı:\n\n" + result["error"] + f"\n\nAyrıntı: {LOG}", error=True)
             return
-        ask_format(result["entry"], result["info"])
+        after_capture(result["entry"], result["info"])
+        if panel["w"] is not None:
+            try:
+                panel["w"].refresh()
+            except Exception:
+                pass
 
-    def run_capture(fg, mode, app_name, port):
+    def run_capture(fg, mode, app_name, port, since):
         result = {}
         try:
             def progress(n, _h):
@@ -375,12 +606,14 @@ def main():
                     q.put(("status", f"ScrollShot: yakalanıyor, {n} kare…"))
             if mode == "cdp":
                 ws, _t = cdp.pick_target(port, title_hint=fg["title"])
-                img, scale, info = cdp.capture_target(ws, progress)
+                img, scale, info = cdp.capture_target(ws, progress, since_ms=since)
             else:
                 while modifiers_down():
                     time.sleep(0.05)
                 time.sleep(0.3)
                 img, scale, info = ss.capture_window(fg["rect"], progress)
+                if since:
+                    info["note"] = "tarih sınırı yalnız Teams/Slack içeriden modunda çalışır"
             result["entry"] = common.store(img, scale, fg["title"], app_name or fg["exe"])
             result["info"] = info
             log(f"yakalama [{mode}] '{fg['title']}': {common.stop_text(info)}")
@@ -431,12 +664,13 @@ def main():
                 threading.Thread(target=relaunch_worker, args=(app_name, port, fg["path"]), daemon=True).start()
                 return
         state["busy"], state["what"] = True, "yakalama sürüyor"
-        log(f"mod={mode} uygulama={app_name}")
+        since = since_ms(settings.get("since"))
+        log(f"mod={mode} uygulama={app_name} tarih_siniri={settings.get('since')}")
         if mode == "cdp":
-            show_status(f"ScrollShot: {app_name} yakalanıyor…")
+            show_status(f"ScrollShot: {app_name} yakalanıyor…" + (f" ({since_label(settings.get('since'))})" if since else ""))
         else:
             notify(f"{fg['title'][:60]}: yakalanıyor (fareye dokunma)")
-        threading.Thread(target=run_capture, args=(fg, mode, app_name, port), daemon=True).start()
+        threading.Thread(target=run_capture, args=(fg, mode, app_name, port, since), daemon=True).start()
 
     def pump():
         try:
@@ -458,8 +692,16 @@ def main():
                         show_status(ev[1])
                 elif kind == "notify":
                     notify(ev[1])
-                elif kind == "history":
-                    history_window()
+                elif kind == "set":
+                    set_setting(ev[1], ev[2])
+                elif kind == "custom_date":
+                    custom_date()
+                elif kind == "pick_dir":
+                    pick_dir()
+                elif kind == "panel":
+                    panel_window()
+                elif kind == "import":
+                    import_dialog()
                 elif kind == "autostart":
                     set_autostart(not autostart_enabled())
                 elif kind == "quit":

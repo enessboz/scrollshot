@@ -38,7 +38,7 @@ JS = """
 const N=%d, FULL=%s;
 const list=document.getElementById('list');
 function mk(i){const d=document.createElement('div');d.className='msg';d.style.height=(40+(i*37%%60))+'px';
- d.style.background='hsl('+(i*53%%360)+',70%%92%%)';d.textContent='Mesaj '+i+' - '+'x'.repeat(i%%40);return d;}
+ d.style.background='hsl('+(i*53%%360)+',70%%92%%)';d.textContent='Mesaj '+i+' - '+'x'.repeat(i%%40);\n d.setAttribute('data-tid','chat-pane-message');\n const t=document.createElement('time');t.setAttribute('datetime',new Date(Date.UTC(2026,0,1,i)).toISOString());t.style.display='none';d.appendChild(t);return d;}
 let first=FULL?0:N-30;
 for(let i=first;i<N;i++) list.appendChild(mk(i));
 if(!FULL){
@@ -121,6 +121,7 @@ def main():
 
         img.save("/tmp/stitched.png"); truth.save("/tmp/truth.png")
         assert info["stop"] == "end", f"üste kadar gidilmedi: {info['stop']}"
+        full_info = c2 = None
         if not float(os.environ.get("DPR", "1")).is_integer():  # kesirli ölçek (%125): en fazla birkaç piksel yuvarlama farkı
             assert img.width == truth.width and abs(img.height - truth.height) <= 3, f"boyut {img.size} != {truth.size}"
             print("OK cdp (kesirli ölçek):", img.size, "gerçek:", truth.size)
@@ -130,6 +131,24 @@ def main():
         bad = int((diff.max(axis=2) > 8).sum())
         assert bad == 0, f"{bad} piksel farklı"
         print("OK cdp: tüm sohbet kusursuz yakalandı:", img.size)
+
+        # Senaryo 2: tarih sınırı. 60. mesajdan itibaren (UTC 2026-01-01 + 60 saat)
+        y60 = c_eval_y60 = None
+        c = cdp.CDP(ws)
+        y60 = c.eval("document.querySelectorAll('[data-tid]')[60].getBoundingClientRect().top - document.getElementById('list').getBoundingClientRect().top")
+        c.call("Page.navigate", url=base)
+        time.sleep(1.0)
+        c.close()
+        ws2, _t = cdp.pick_target(port)
+        since = int(1767225600000 + 60 * 3600 * 1000)  # 2026-01-01T00:00Z + 60 saat
+        img2, ppc2, info2 = cdp.capture_target(ws2, since_ms=since)
+        print(f"tarih sınırı: {info2['frames']} kare, {info2['stop']}, {img2.size}, not={info2['note']!r}")
+        exp = truth.crop((0, int(y60 * ppc2) - 4, truth.width, truth.height))
+        assert info2["stop"] == "end", info2["stop"]
+        assert img2.size == exp.size, f"sınırlı boyut {img2.size} != {exp.size}"
+        bad2 = int((np.abs(np.asarray(img2, dtype=int) - np.asarray(exp, dtype=int)).max(axis=2) > 8).sum())
+        assert bad2 == 0, f"sınırlı yakalamada {bad2} piksel farklı"
+        print("OK cdp: tarih sınırı doğru başladı, kusursuz:", img2.size)
     finally:
         proc.terminate()
         shutil.rmtree(tmp, ignore_errors=True)
