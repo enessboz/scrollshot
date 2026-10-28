@@ -27,7 +27,7 @@ def _home():
 
 HOME = os.environ.get("SCROLLSHOT_HOME") or _home()
 CODE = os.path.join(HOME, "code")
-NEEDED = {"app.py", "scrollshot.py", "updater.py", "_version.py"}
+NEEDED = {"app.py", "scrollshot.py", "updater.py", "_version.py"} | ({"cdp.py", "app_win.py"} if sys.platform == "win32" else set())
 
 
 class NeedsFull(Exception):

@@ -21,7 +21,9 @@ def _home():
 
 HOME = os.environ.get("SCROLLSHOT_HOME") or _home()
 CODE = os.path.join(HOME, "code")
-NAMES = ("_version", "scrollshot", "updater", "app")
+WIN = sys.platform == "win32"
+NAMES = ("_version", "scrollshot", "cdp", "updater", "app", "app_win") if WIN else ("_version", "scrollshot", "updater", "app")
+ENTRY = "app_win" if WIN else "app"
 
 
 def _build_of(path):
@@ -66,18 +68,18 @@ def main():
             newer = False
         else:
             try:
-                sys.modules["app"].main()
+                sys.modules[ENTRY].main()
             except Exception:
                 traceback.print_exc()
                 shutil.rmtree(CODE, ignore_errors=True)
                 _mark_bad(build)
                 raise
             return
-    import app  # uygulamanın içindeki sürüm
-    app.main()
+    # uygulamanın içindeki sürüm (importlib: PyInstaller'ın platforma özel modülü yanlış pakete almasını önler)
+    importlib.import_module(ENTRY).main()
 
 
-LOG = os.path.join(os.path.expanduser("~"), "Library", "Logs", "ScrollShot.log")
+LOG = os.path.join(HOME, "ScrollShot.log") if WIN else os.path.join(os.path.expanduser("~"), "Library", "Logs", "ScrollShot.log")
 
 
 def _log(text):
@@ -90,7 +92,7 @@ def _log(text):
 
 
 if __name__ == "__main__":
-    if getattr(sys, "frozen", False) and sys.platform == "darwin":
+    if getattr(sys, "frozen", False):
         try:  # pencere yok: hata çıktıları günlüğe gitsin
             sys.stderr = open(LOG, "a", encoding="utf-8", buffering=1)
         except OSError:
@@ -105,6 +107,10 @@ if __name__ == "__main__":
         _log(err)
         short = err.strip().splitlines()[-1].replace('"', "'").replace("\\", " ")[:200]
         try:
+            if WIN:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(0, f"ScrollShot başlatılamadı.\n\n{short}\n\nAyrıntı: {LOG}", "ScrollShot", 0x10)
+                raise SystemExit(1)
             subprocess.run(["osascript", "-e",
                             f'display dialog "ScrollShot başlatılamadı.\n\n{short}\n\nAyrıntı: ~/Library/Logs/ScrollShot.log" '
                             'buttons {"Tamam"} with icon stop'], timeout=60)

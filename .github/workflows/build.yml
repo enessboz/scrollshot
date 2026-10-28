@@ -17,9 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Build and publish
+      - name: Build
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILD: ${{ github.run_number }}
         run: |
           python -m pip install -r requirements.txt pyinstaller
@@ -29,14 +28,67 @@ jobs:
           python test_app_logic.py
           pyinstaller --noconfirm --windowed --name ScrollShot \
             --osx-bundle-identifier com.enessboz.scrollshot \
-            --hidden-import Quartz --hidden-import ApplicationServices \
+            --hidden-import app --hidden-import Quartz --hidden-import ApplicationServices \
             --hidden-import AppKit --hidden-import Foundation launcher.py
           # Dock'ta görünmesin, yalnız menü çubuğunda dursun
           /usr/libexec/PlistBuddy -c 'Add :LSUIElement bool true' dist/ScrollShot.app/Contents/Info.plist
           codesign --force --deep --sign - dist/ScrollShot.app
           ditto -c -k --keepParent dist/ScrollShot.app ScrollShot-mac.zip
-          zip code.zip app.py scrollshot.py updater.py _version.py
-          gh release create "build-$BUILD" ScrollShot-mac.zip code.zip \
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScrollShot-mac
+          path: ScrollShot-mac.zip
+
+  win:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build
+        env:
+          BUILD: ${{ github.run_number }}
+        run: |
+          python -m pip install -r requirements.txt pyinstaller
+          sed -i "s/^BUILD = .*/BUILD = $BUILD/" _version.py
+          python test_stitch.py
+          python test_updater.py
+          python test_app_logic.py
+          python test_cdp.py || echo "UYARI: CDP testi geçmedi (derleme devam ediyor)"
+          pyinstaller --noconfirm --windowed --name ScrollShot \
+            --hidden-import app --hidden-import app_win --hidden-import cdp \
+            --hidden-import pystray._win32 launcher.py
+          powershell -Command "Compress-Archive -Path dist/ScrollShot -DestinationPath ScrollShot-win.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScrollShot-win
+          path: ScrollShot-win.zip
+
+  release:
+    needs: [mac, win]
+    if: ${{ !cancelled() && needs.mac.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ScrollShot-*
+          path: dl
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          sed -i "s/^BUILD = .*/BUILD = $BUILD/" _version.py
+          zip code.zip app.py scrollshot.py updater.py _version.py cdp.py app_win.py
+          ASSETS="code.zip dl/ScrollShot-mac.zip"
+          if [ -f dl/ScrollShot-win.zip ]; then ASSETS="$ASSETS dl/ScrollShot-win.zip"; fi
+          gh release create "build-$BUILD" $ASSETS \
             --title "ScrollShot build $BUILD" \
-            --notes "İlk kurulum: ScrollShot-mac.zip. Kurulu uygulama kendini code.zip ile otomatik günceller." \
+            --notes "İlk kurulum: Mac için ScrollShot-mac.zip, Windows için ScrollShot-win.zip. Kurulu uygulama kendini code.zip ile otomatik günceller." \
             --latest

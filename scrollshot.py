@@ -86,18 +86,30 @@ class Stitcher:
         self.last_shift = 0
         self.diag = {}
 
-    def add(self, frame):
-        """Dönüş: 'ok' | 'end' (aynı kare, bitti) | 'fail' (örtüşme bulunamadı)."""
+    def add(self, frame, hints=()):
+        """Dönüş: 'ok' | 'end' (aynı kare, bitti) | 'fail' (örtüşme bulunamadı).
+
+        hints: bilinen olası kayma miktarları (piksel). Önce bunlar denenir (örn. sayfa içinden okunan scrollTop farkı),
+        tutmazsa tüm kaymalar taranır.
+        """
         g = to_gray(frame)
         if self.prev is None:
             self.strips.append(frame)
             self.prev, self.prev_gray = frame, g
             return "ok"
         h = frame.height
-        if self.up:
-            s = find_shift(self.prev_gray[::-1], g[::-1], diag=self.diag)
-        else:
-            s = find_shift(self.prev_gray, g, diag=self.diag)
+        if np.abs(self.prev_gray - g).mean() < 0.3:
+            return "end"
+        s = None
+        for hs in hints:
+            if self._hint_ok(g, hs):
+                s = hs
+                break
+        if s is None:
+            if self.up:
+                s = find_shift(self.prev_gray[::-1], g[::-1], diag=self.diag)
+            else:
+                s = find_shift(self.prev_gray, g, diag=self.diag)
         if s == 0:
             return "end"
         if s is None:
@@ -109,6 +121,28 @@ class Stitcher:
         self.prev, self.prev_gray = frame, g
         self.last_shift = s
         return "ok"
+
+    def _diff_at(self, g, s):
+        h = g.shape[0]
+        if not 1 <= s < h - 8:
+            return None
+        if self.up:
+            a, b = self.prev_gray[:h - s], g[s:]
+        else:
+            a, b = self.prev_gray[s:], g[:h - s]
+        return float(np.abs(a - b).mean())
+
+    def _hint_ok(self, g, s):
+        """Bilinen kayma doğrulaması: neredeyse birebir eşleşmeli ya da komşu kaymalardan belirgin iyi olmalı."""
+        d0 = self._diff_at(g, s)
+        if d0 is None:
+            return False
+        if d0 < 0.5:
+            return True
+        if d0 >= 3.0:
+            return False
+        nb = [d for d in (self._diff_at(g, s + k) for k in (-30, -15, 15, 30)) if d is not None]
+        return bool(nb) and d0 < 0.6 * min(nb)
 
     def height(self):
         return sum(s.height for s in self.strips)
