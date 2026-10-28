@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 def code_zip(build, shell):
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w") as z:
-        for n in ("app.py", "scrollshot.py", "updater.py"):
+        for n in ("app.py", "scrollshot.py", "updater.py", "cdp.py", "app_win.py"):
             z.writestr(n, "# stub\n")
         z.writestr("_version.py", f"BUILD = {build}\nSHELL = {shell}\n")
     return b.getvalue()
