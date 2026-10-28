@@ -166,25 +166,55 @@ def set_autostart(on):
 
 # ---------------- Teams / Slack'i yakalama modunda açma ----------------
 
+WV2_POLICY = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+
+
+def _wv2_policy(exe, args):
+    """WebView2'nin kayıt defteri üzerinden ek bağımsız değişken yolu (ortam değişkeni işe yaramazsa). args=None siler."""
+    import winreg
+    try:
+        if args is None:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WV2_POLICY, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, exe)
+        else:
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, WV2_POLICY, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.SetValueEx(k, exe, 0, winreg.REG_SZ, args)
+    except OSError as e:
+        log(f"kayıt defteri ({'sil' if args is None else 'yaz'}): {e}")
+
+
 def relaunch_in_capture_mode(name, port, exe_path):
-    """Uygulamayı kapatıp hata ayıklama portuyla yeniden açar. Port açılırsa True."""
+    """Uygulamayı kapatıp hata ayıklama portuyla yeniden açar. Port açılırsa (yöntem adı) döner, açılmazsa None."""
+    import cdp
     flags = 0x08000000  # CREATE_NO_WINDOW
     exe = os.path.basename(exe_path)
-    subprocess.run(["taskkill", "/F", "/T", "/IM", exe], capture_output=True, creationflags=flags)
-    time.sleep(3)
-    env = os.environ.copy()
-    if name == "Teams":
-        env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={port}"
-        alias = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", "ms-teams.exe")
-        subprocess.Popen([alias if os.path.exists(alias) else exe_path], env=env)
-    else:
-        subprocess.Popen([exe_path, f"--remote-debugging-port={port}"], env=env)
-    import cdp
-    for _ in range(60):
-        time.sleep(1)
-        if cdp.port_open(port):
-            return True
-    return False
+    args = f"--remote-debugging-port={port}"
+    for via in (("env", "registry") if name == "Teams" else ("arg",)):
+        log(f"{name}: yeniden başlatılıyor ({via})")
+        subprocess.run(["taskkill", "/F", "/T", "/IM", exe], capture_output=True, creationflags=flags)
+        time.sleep(3)
+        env = os.environ.copy()
+        try:
+            if name == "Teams":
+                alias = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", "ms-teams.exe")
+                target = alias if os.path.exists(alias) else exe_path
+                if via == "env":
+                    env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = args
+                else:
+                    _wv2_policy(exe, args)
+                subprocess.Popen([target], env=env)
+            else:
+                subprocess.Popen([exe_path, args], env=env)
+            for _ in range(40):
+                time.sleep(1)
+                if cdp.port_open(port):
+                    log(f"{name}: port {port} açıldı ({via})")
+                    return via
+        finally:
+            if via == "registry":
+                _wv2_policy(exe, None)
+        log(f"{name}: port açılmadı ({via})")
+    return None
 
 
 # ---------------- Uygulama ----------------
@@ -195,6 +225,8 @@ def main():
     update_result = updater.auto_update()  # yeni sürüm varsa kurar ve yeniden açar
     set_dpi_aware()
     if not single_instance():
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, f"ScrollShot zaten çalışıyor.\n\nTepsi simgesi gizli olabilir (görev çubuğunda ^ okuna tıkla). Kısayol: {HOTKEY_LABEL}", "ScrollShot", 0x40)
         return
 
     import tkinter as tk
@@ -210,7 +242,7 @@ def main():
     common.HIST = os.path.join(common.LIB, "history.json")
     settings = load_settings()
     q = queue.Queue()
-    state = {"busy": False, "frames": 0}
+    state = {"busy": False, "frames": 0, "what": ""}
 
     root = tk.Tk()
     root.withdraw()
@@ -225,10 +257,36 @@ def main():
     d.ellipse([27, 27, 37, 39], fill=(30, 110, 230, 255))
 
     def notify(msg, title="ScrollShot"):
+        log(f"bildirim: {title}: {msg}")
         try:
             icon.notify(msg, title)
         except Exception:
-            log(f"bildirim: {title}: {msg}")
+            pass
+
+    def alert(msg, error=False):
+        """Görünür kalsın diye gerçek pencere (tepsi bildirimleri Windows'ta sık gizleniyor)."""
+        log(f"uyarı: {msg}")
+        (messagebox.showerror if error else messagebox.showinfo)("ScrollShot", msg)
+
+    status_win = {"w": None, "l": None}
+
+    def show_status(text):
+        if text is None:
+            if status_win["w"]:
+                status_win["w"].destroy()
+                status_win["w"] = status_win["l"] = None
+            return
+        if status_win["w"] is None:
+            w = tk.Toplevel(root)
+            w.overrideredirect(True)
+            w.attributes("-topmost", True)
+            lab = tk.Label(w, text=text, bg="#1e6ee6", fg="white", font=("Segoe UI", 11), padx=16, pady=10)
+            lab.pack()
+            w.update_idletasks()
+            w.geometry(f"+{w.winfo_screenwidth() - w.winfo_width() - 24}+{w.winfo_screenheight() - w.winfo_height() - 80}")
+            status_win["w"], status_win["l"] = w, lab
+        else:
+            status_win["l"].config(text=text)
 
     menu = pystray.Menu(
         pystray.MenuItem(f"Öndeki pencereyi yakala   {HOTKEY_LABEL}", lambda: q.put(("capture",)), default=True),
@@ -299,10 +357,11 @@ def main():
     # --- yakalama ---
     def finish(result):
         state["busy"] = False
+        show_status(None)
         icon.title = "ScrollShot"
         if result.get("error"):
             log("yakalama hatası: " + result["error"])
-            notify(result["error"], "Yakalanamadı")
+            alert("Yakalanamadı:\n\n" + result["error"] + f"\n\nAyrıntı: {LOG}", error=True)
             return
         ask_format(result["entry"], result["info"])
 
@@ -312,6 +371,8 @@ def main():
             def progress(n, _h):
                 state["frames"] = n
                 icon.title = f"ScrollShot: {n} kare"
+                if mode == "cdp":
+                    q.put(("status", f"ScrollShot: yakalanıyor, {n} kare…"))
             if mode == "cdp":
                 ws, _t = cdp.pick_target(port, title_hint=fg["title"])
                 img, scale, info = cdp.capture_target(ws, progress)
@@ -329,24 +390,31 @@ def main():
             import traceback
             log(traceback.format_exc())
             result["error"] = f"{type(e).__name__}: {e}"
+            if mode == "cdp":
+                try:
+                    log("hedefler: " + json.dumps([t.get("title") for t in cdp.list_targets(port)], ensure_ascii=False))
+                except Exception as e2:
+                    log(f"hedefler okunamadı: {e2}")
         q.put(("done", result))
 
     def relaunch_worker(name, port, path):
-        ok = relaunch_in_capture_mode(name, port, path)
-        if ok:
-            q.put(("notify", f"{name} yakalama modunda açıldı. Sohbeti açıp {HOTKEY_LABEL} tuşlarına tekrar bas."))
+        via = relaunch_in_capture_mode(name, port, path)
+        if via:
+            q.put(("alert", f"{name} yakalama modunda açıldı ({via}).\n\nSohbeti aç, sonra {HOTKEY_LABEL} tuşlarına bas."))
         else:
             settings.setdefault("no_cdp", []).append(name)
             save_settings(settings)
-            q.put(("notify", f"{name} bu yolu kabul etmedi; görüntü yöntemiyle devam edeceğim."))
+            q.put(("alert", f"{name} yakalama modunu kabul etmedi (iki yöntem de denendi).\n\nBundan sonra görüntüden birleştirme yöntemiyle devam edeceğim: {name}'te sohbeti aç, {HOTKEY_LABEL} tuşlarına bas ve yakalama bitene kadar fareye dokunma."))
         q.put(("relaunched",))
 
     def on_capture():
         if state["busy"]:
+            alert(f"ScrollShot şu an meşgul: {state['what'] or 'bir işlem sürüyor'}.")
             return
         fg = foreground()
+        log(f"kısayol: ön pencere exe={fg and fg['exe']} başlık={fg and fg['title']!r}")
         if not fg or fg["exe"] in ("", "scrollshot.exe"):
-            notify("Yakalanacak pencereyi öne alıp tekrar dene.")
+            alert("Yakalanacak pencere bulunamadı. Pencereyi öne alıp tekrar dene.")
             return
         mode, app_name, port = "pixel", None, None
         if fg["exe"] in CDP_APPS and CDP_APPS[fg["exe"]][0] not in settings.get("no_cdp", []):
@@ -358,12 +426,16 @@ def main():
                     f"{app_name}'i tam sayfa yakalayabilmem için yakalama modunda yeniden başlatmam gerekiyor.\n\n"
                     f"{app_name} kapanıp açılacak (açık toplantı/arama varsa kesilir). Bu bir kereliğine; kapatıp açana kadar geçerli.\n\n"
                     "Şimdi yeniden başlatayım mı?\n(Hayır dersen görüntüden birleştirme yöntemini kullanırım.)"):
-                state["busy"] = True
-                notify(f"{app_name} yeniden başlatılıyor, bekle...")
+                state["busy"], state["what"] = True, f"{app_name} yeniden başlatılıyor (1-2 dakika sürebilir)"
+                show_status(f"ScrollShot: {app_name} yeniden başlatılıyor, bekle…")
                 threading.Thread(target=relaunch_worker, args=(app_name, port, fg["path"]), daemon=True).start()
                 return
-        state["busy"] = True
-        notify(f"{fg['title'][:60]}: yakalanıyor" + (" (fareye dokunma)" if mode == "pixel" else ""))
+        state["busy"], state["what"] = True, "yakalama sürüyor"
+        log(f"mod={mode} uygulama={app_name}")
+        if mode == "cdp":
+            show_status(f"ScrollShot: {app_name} yakalanıyor…")
+        else:
+            notify(f"{fg['title'][:60]}: yakalanıyor (fareye dokunma)")
         threading.Thread(target=run_capture, args=(fg, mode, app_name, port), daemon=True).start()
 
     def pump():
@@ -377,6 +449,13 @@ def main():
                     finish(ev[1])
                 elif kind == "relaunched":
                     state["busy"] = False
+                    show_status(None)
+                elif kind == "alert":
+                    show_status(None)
+                    alert(ev[1])
+                elif kind == "status":
+                    if state["busy"]:
+                        show_status(ev[1])
                 elif kind == "notify":
                     notify(ev[1])
                 elif kind == "history":
@@ -392,9 +471,11 @@ def main():
         root.after(150, pump)
 
     if update_result and update_result[0] == "full":
-        q.put(("notify", "Yeni sürüm için uygulamayı yeniden indirmen gerekiyor: " + update_result[1]))
-    else:
-        q.put(("notify", f"Tepsi simgesinde. Bir pencerede {HOTKEY_LABEL} tuşlarına bas."))
+        q.put(("alert", "Yeni sürüm için uygulamayı yeniden indirmen gerekiyor:\n" + update_result[1]))
+    elif not settings.get("welcomed"):
+        settings["welcomed"] = True
+        save_settings(settings)
+        q.put(("alert", f"ScrollShot çalışıyor.\n\nYakalamak istediğin pencerede {HOTKEY_LABEL} tuşlarına bas.\nTepsi simgesi görev çubuğunun sağında; gizliyse ^ okuna tıkla.\n\nTeams ve Slack'te ilk seferde yakalama modunda yeniden başlatmak için izin ister."))
     log(f"başladı (sürüm {_version.BUILD})")
     root.after(150, pump)
     root.mainloop()
