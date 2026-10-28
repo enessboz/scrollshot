@@ -38,7 +38,8 @@ STOP_TEXT = {"end": "en üste kadar gidildi", "fail": "DURDU: kareler eşleşmed
 def stop_text(info):
     if not info:
         return ""
-    return f'{info["frames"]} kare, {STOP_TEXT.get(info["stop"], info["stop"])}'
+    secs = f' · {info["seconds"]:.0f} sn' if info.get("seconds") else ""
+    return f'{info["frames"]} kare, {STOP_TEXT.get(info["stop"], info["stop"])}{secs}'
 
 
 def log_capture(title, info):

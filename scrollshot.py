@@ -161,6 +161,23 @@ class Stitcher:
         return out
 
 
+def wait_settled(grab, rect, min_wait=0.25, max_wait=0.9, step=0.1):
+    """Kaydırma durana dek bekler: iki ardışık kare aynıysa hemen döner (sabit uzun bekleme yerine). Son kareyi döner."""
+    time.sleep(min_wait)
+    cur = grab(rect)
+    prev = to_gray(cur)
+    waited = min_wait
+    while waited < max_wait:
+        time.sleep(step)
+        waited += step
+        cur = grab(rect)
+        g = to_gray(cur)
+        if np.abs(g - prev).mean() < 0.3:
+            break
+        prev = g
+    return cur
+
+
 def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_seconds=240):
     """win = (x, y, w, h) nokta cinsinden pencere. Kaydırılan alanı bulur, en üste çıkıp (tembel yüklenen eski içerik
     yüklensin diye) yukarıdan aşağıya yakalar.
@@ -172,6 +189,7 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_second
 
     pyautogui.FAILSAFE = True  # fareyi ekran köşesine götürürsen durur (o ana kadarki kaydedilir)
     pyautogui.PAUSE = 0
+    started = time.time()
     x, y, w, h = win
     with mss.mss() as sct:
         def grab(r):
@@ -231,8 +249,7 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_second
             amount, fails, frames = 4, 0, 1
             while frames < max_frames:
                 pyautogui.scroll(-amount)
-                time.sleep(delay)
-                res = st.add(grab(rect))
+                res = st.add(wait_settled(grab, rect, max_wait=delay + 0.2))
                 if res == "fail":  # animasyon bitmemiş olabilir: aynı konumda yeniden dene
                     time.sleep(1.2)
                     res = st.add(grab(rect))
@@ -240,8 +257,7 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_second
                 if res == "end":  # sayfa sonu mu, yoksa içerik yükleniyor mu?
                     time.sleep(1.5)
                     pyautogui.scroll(-amount)
-                    time.sleep(delay)
-                    res = st.add(grab(rect))
+                    res = st.add(wait_settled(grab, rect, max_wait=delay + 0.2))
                     log.append(f"  yeniden: sonuç={res}")
                     if res == "end":
                         stop = "end"
@@ -249,7 +265,7 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_second
                 if res == "fail":
                     fails += 1
                     pyautogui.scroll(amount)
-                    time.sleep(delay)
+                    wait_settled(grab, rect, max_wait=delay + 0.2)
                     if amount == 1 or fails >= 4:
                         stop = "fail"
                         break
@@ -265,13 +281,14 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_second
             stop = "failsafe"
         if st is None or not st.strips:
             raise CaptureError("Yakalama başlamadan durduruldu")
-        return st.result(), scale, {"frames": frames, "stop": stop, "log": log, "rect": rect}
+        return st.result(), scale, {"frames": frames, "stop": stop, "log": log, "rect": rect,
+                                    "seconds": time.time() - started}
 
 
 def export_image(img, fmt, path, scale=2.0):
     """img'yi png/jpg/pdf olarak path'e yazar. Çok uzun PDF birkaç sayfaya bölünür."""
     if fmt == "png":
-        img.save(path, dpi=(72 * scale, 72 * scale))
+        img.save(path, dpi=(72 * scale, 72 * scale), compress_level=3)  # 3: 6'dan belirgin hızlı, dosya biraz büyük
     elif fmt == "jpg":
         if img.height > 65000:
             raise CaptureError("JPG en fazla 65000 px yüksekliği destekler; PNG veya PDF seç.")

@@ -144,7 +144,7 @@ def _state(c):
     return st
 
 
-def _settle(c, quiet=0.2, maxwait=2.5):
+def _settle(c, quiet=0.12, maxwait=2.5):
     """scrollTop ve scrollHeight bir süre değişmeyene kadar bekler (yumuşak kaydırma, tembel yükleme)."""
     t0 = time.time()
     last, since = None, time.time()
@@ -164,10 +164,19 @@ def _scroll_to(c, y):
     return _settle(c)
 
 
+_FAST = {"on": True}
+
+
 def _shot(c, st):
-    r = c.call("Page.captureScreenshot", format="png", fromSurface=True, captureBeyondViewport=False,
-               clip={"x": st["x"] + st["px"], "y": st["y"] + st["py"], "width": st["w"], "height": st["h"],
-                     "scale": 1})
+    params = dict(format="png", fromSurface=True, captureBeyondViewport=False,
+                  clip={"x": st["x"] + st["px"], "y": st["y"] + st["py"], "width": st["w"], "height": st["h"], "scale": 1})
+    try:  # PNG sıkıştırmayı hıza göre ayarla (eski sürümler bilmiyorsa normal yola dön)
+        r = c.call("Page.captureScreenshot", **params, **({"optimizeForSpeed": True} if _FAST["on"] else {}))
+    except CDPError:
+        if not _FAST["on"]:
+            raise
+        _FAST["on"] = False
+        r = c.call("Page.captureScreenshot", **params)
     return Image.open(io.BytesIO(base64.b64decode(r["data"]))).convert("RGB")
 
 
@@ -199,6 +208,7 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
     """Seçilen sayfadaki kayan alanı önce en üste çıkıp (tüm içerik yüklensin), sonra yukarıdan aşağıya yakalar. (img, piksel/css ölçeği, info) döner."""
     c = CDP(ws_url)
     log = []
+    started = time.time()
     try:
         found = c.eval(FIND_JS % "true")
         if not found or not found.get("found"):
@@ -214,7 +224,11 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
         while time.time() - t0 < preload_seconds:
             _scroll_to(c, 80)  # küçük bir kıpırdatma: yükleme tetikleyicilerini çalıştırır
             _scroll_to(c, 0)
-            time.sleep(1.0)
+            t1 = time.time()
+            while time.time() - t1 < 1.0:  # yeni içerik gelirse (yükseklik değişir) hemen devam et
+                time.sleep(0.08)
+                if _state(c)["height"] != last_h:
+                    break
             st = _settle(c)
             if st["top"] <= 0.5 and st["height"] == last_h:
                 stable += 1
@@ -230,7 +244,7 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
         ppc = img.width / st["w"]  # piksel / css px
         stitch = ss.Stitcher("down")
         stitch.add(img)
-        frames, stop, step = 1, "max", max(80, int(st["client"] * 0.75))
+        frames, stop, step = 1, "max", max(80, int(st["client"] * 0.85))
         log.append(f"başlangıç top={st['top']} height={st['height']} client={st['client']} ppc={ppc:.2f}")
         for _ in range(max_steps):
             old = st
@@ -260,7 +274,7 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, pr
             if stitch.height() > max_height_px:
                 stop = "max"
                 break
-        return stitch.result(), ppc, {"frames": frames, "stop": stop, "log": log}
+        return stitch.result(), ppc, {"frames": frames, "stop": stop, "log": log, "seconds": time.time() - started}
     finally:
         try:
             c.eval(RESTORE_JS)
