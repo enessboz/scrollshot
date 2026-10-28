@@ -36,10 +36,15 @@ def find_shift(prev, new, min_overlap_frac=0.1, tol=6.0, margin=0.1, diag=None):
     for s in range(1, smax + 1):
         d[s - 1] = np.abs(prev[s + m:h - m] - new[m:h - m - s]).mean()
     i = int(d.argmin())
+    med = float(np.median(d))
+    far = np.concatenate([d[:max(0, i - 5)], d[i + 6:]])  # en iyi kaymanın komşuları hariç ikinci en iyi
+    second = float(far.min()) if far.size else med
     if diag is not None:
-        diag.update(best=float(d[i]), median=float(np.median(d)), shift=i + 1)
-    # Hem mutlak olarak düşük hem de diğer kaymalardan belirgin ayrışmalı.
-    if d[i] < tol and d[i] < 0.5 * float(np.median(d)):
+        diag.update(best=float(d[i]), median=med, second=second, shift=i + 1)
+    # Net bir tepe olmalı: ya birebire yakın, ya da (bulanık/gürültülü kareler için) hem ortancadan hem ikincisinden belirgin iyi.
+    if d[i] < tol and d[i] < 0.5 * med:
+        return i + 1
+    if d[i] < 3 * tol and d[i] < 0.6 * med and d[i] < 0.7 * second:
         return i + 1
     return None
 
@@ -57,7 +62,7 @@ def detect_scroll_region(a_img, b_img, thresh=25, row_frac=0.01, col_frac=0.01):
     idx = np.flatnonzero(rows)
     if idx.size == 0:
         return None
-    gap = max(8, int(0.05 * H))
+    gap = max(8, int(0.3 * H))  # mesajlar arası boşluklar alanı bölmesin (sabit alanlar zaten hiç değişmez)
     runs, start, prev = [], idx[0], idx[0]
     for i in idx[1:]:
         if i - prev > gap:
@@ -156,8 +161,9 @@ class Stitcher:
         return out
 
 
-def capture_window(win, progress=None, delay=0.7, max_frames=400):
-    """win = (x, y, w, h) nokta cinsinden pencere. Kaydırılan alanı bulur, en alta gidip yukarı doğru yakalar.
+def capture_window(win, progress=None, delay=0.7, max_frames=400, preload_seconds=240):
+    """win = (x, y, w, h) nokta cinsinden pencere. Kaydırılan alanı bulur, en üste çıkıp (tembel yüklenen eski içerik
+    yüklensin diye) yukarıdan aşağıya yakalar.
 
     Dönüş: (PIL görüntü, ölçek, info). info = kare sayısı, durma nedeni (end/fail/max/failsafe), ayrıntılı günlük.
     """
@@ -193,35 +199,47 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400):
         if rect is None:
             raise CaptureError("Kaydırılabilir alan bulunamadı. Pencerede kaydırılan bir içerik var mı?")
         rx, ry, rw, rh = rect
-        # Fare, kaydırılan alanın alt kısmında dursun: yukarı giderken hover araç çubuğu şeritlere girmesin.
-        pyautogui.moveTo(rx + int(rw * 0.7), ry + int(rh * 0.85))
-        time.sleep(0.1)
-
-        # 2) En alta git (zaten altaysa hemen biter).
-        prev = None
-        for _ in range(150):
-            pyautogui.scroll(-40)
-            time.sleep(0.25)
-            g = to_gray(grab(rect))
-            if prev is not None and np.abs(g - prev).mean() < 0.3:
-                break
-            prev = g
-
-        # 3) Yukarı doğru yakala.
-        st = Stitcher("up")
-        st.add(grab(rect))
-        amount, fails, frames = 4, 0, 1
-        stop = "max"
         log = [f"pencere={win} alan={rect} ölçek={scale:.1f}"]
+        stop = "max"
+
+        # 2) En üste çık; eski mesajlar yüklenirken görünüm atlayabilir, o yüzden kararlı olana dek bekle.
+        pyautogui.moveTo(rx + int(rw * 0.7), ry + int(rh * 0.5))
+        time.sleep(0.1)
+        prev, same, loops, t0 = None, 0, 0, time.time()
+        st, frames = None, 0
         try:
+            while time.time() - t0 < preload_seconds:
+                pyautogui.scroll(40)
+                time.sleep(0.3)
+                g = to_gray(grab(rect))
+                loops += 1
+                if prev is not None and np.abs(g - prev).mean() < 0.3:
+                    same += 1
+                    if same >= 3:
+                        break
+                    time.sleep(1.0)  # içerik yükleniyor olabilir
+                else:
+                    same = 0
+                prev = g
+            log.append(f"üste çıkış: {loops} adım, {time.time() - t0:.0f} sn, kararlı={same >= 3}")
+
+            # 3) Yukarıdan aşağıya yakala (aşağı giderken yeni içerik yüklenmediği için atlama olmaz).
+            pyautogui.moveTo(rx + int(rw * 0.7), ry + int(rh * 0.15))  # hover araç çubuğu şeritlere girmesin
+            time.sleep(delay)
+            st = Stitcher("down")
+            st.add(grab(rect))
+            amount, fails, frames = 4, 0, 1
             while frames < max_frames:
-                pyautogui.scroll(amount)
+                pyautogui.scroll(-amount)
                 time.sleep(delay)
                 res = st.add(grab(rect))
+                if res == "fail":  # animasyon bitmemiş olabilir: aynı konumda yeniden dene
+                    time.sleep(1.2)
+                    res = st.add(grab(rect))
                 log.append(f"kaydır={amount} sonuç={res} kayma={st.last_shift} tanı={st.diag}")
-                if res == "end":  # tembel yükleme olabilir: bekle, bir daha dene
+                if res == "end":  # sayfa sonu mu, yoksa içerik yükleniyor mu?
                     time.sleep(1.5)
-                    pyautogui.scroll(amount)
+                    pyautogui.scroll(-amount)
                     time.sleep(delay)
                     res = st.add(grab(rect))
                     log.append(f"  yeniden: sonuç={res}")
@@ -230,7 +248,7 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400):
                         break
                 if res == "fail":
                     fails += 1
-                    pyautogui.scroll(-amount)
+                    pyautogui.scroll(amount)
                     time.sleep(delay)
                     if amount == 1 or fails >= 4:
                         stop = "fail"
@@ -240,13 +258,14 @@ def capture_window(win, progress=None, delay=0.7, max_frames=400):
                 fails = 0
                 frames += 1
                 if st.last_shift > 0:  # kayma ~ yarım kare olacak şekilde miktarı ayarla
-                    amount = max(1, min(60, round(amount * 0.45 * st.strips[-1].height / st.last_shift)))
+                    amount = max(1, min(60, round(amount * 0.45 * st.prev.height / st.last_shift)))
                 if progress:
                     progress(frames, st.height())
         except pyautogui.FailSafeException:
             stop = "failsafe"
-        info = {"frames": frames, "stop": stop, "log": log}
-        return st.result(), scale, info
+        if st is None or not st.strips:
+            raise CaptureError("Yakalama başlamadan durduruldu")
+        return st.result(), scale, {"frames": frames, "stop": stop, "log": log, "rect": rect}
 
 
 def export_image(img, fmt, path, scale=2.0):

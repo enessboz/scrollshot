@@ -195,8 +195,8 @@ def pick_target(port, title_hint=""):
     return best
 
 
-def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000):
-    """Seçilen sayfadaki kayan alanı en alttan en üste kadar yakalar. (img, piksel/css ölçeği, info) döner."""
+def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000, preload_seconds=240):
+    """Seçilen sayfadaki kayan alanı önce en üste çıkıp (tüm içerik yüklensin), sonra yukarıdan aşağıya yakalar. (img, piksel/css ölçeği, info) döner."""
     c = CDP(ws_url)
     log = []
     try:
@@ -207,49 +207,47 @@ def capture_target(ws_url, progress=None, max_steps=800, max_height_px=90000):
         hidden = c.eval(HIDE_JS)
         log.append(f"gizlenen yapışkan/sabit öğe={hidden}")
 
-        # En alta git (tembel yükleme olabilir: kararlı olana dek tekrarla).
-        st = _scroll_to(c, 10 ** 9)
-        for _ in range(5):
-            time.sleep(0.3)
-            nxt = _scroll_to(c, 10 ** 9)
-            if nxt["height"] == st["height"]:
-                st = nxt
-                break
-            st = nxt
+        # 1) En üste çık: eski içerik tembel yükleniyorsa tamamı yüklenene dek bekle (yukarı giderken görünüm sıçrayabilir,
+        #    o yüzden yakalamayı yüklemeden sonra, yukarıdan aşağıya yapıyoruz).
+        st = _scroll_to(c, 0)
+        last_h, stable, t0 = st["height"], 0, time.time()
+        while time.time() - t0 < preload_seconds:
+            _scroll_to(c, 80)  # küçük bir kıpırdatma: yükleme tetikleyicilerini çalıştırır
+            _scroll_to(c, 0)
+            time.sleep(1.0)
+            st = _settle(c)
+            if st["top"] <= 0.5 and st["height"] == last_h:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+            last_h = st["height"]
+        log.append(f"üste çıkış: {time.time() - t0:.0f} sn, yükseklik={st['height']}, kararlı={stable >= 2}")
 
+        # 2) Yukarıdan aşağıya yakala.
         img = _shot(c, st)
         ppc = img.width / st["w"]  # piksel / css px
-        stitch = ss.Stitcher("up")
+        stitch = ss.Stitcher("down")
         stitch.add(img)
         frames, stop, step = 1, "max", max(80, int(st["client"] * 0.75))
-        log.append(f"başlangıç top={st['top']} height={st['height']} ppc={ppc:.2f}")
+        log.append(f"başlangıç top={st['top']} height={st['height']} client={st['client']} ppc={ppc:.2f}")
         for _ in range(max_steps):
             old = st
-            if old["top"] <= 0.5:  # en üst: tembel yüklenen eski içerik var mı?
-                time.sleep(1.2)
+            if old["top"] + old["client"] >= old["height"] - 1:  # en alt: yeni içerik geldi mi?
+                time.sleep(0.8)
                 st = _settle(c)
-                if st["top"] <= 0.5 and st["height"] <= old["height"] + 1:
+                if st["height"] <= old["height"] + 1:
                     stop = "end"
                     break
-                if st["top"] <= 0.5:
-                    continue
-                old = st
-            st = _scroll_to(c, max(0, old["top"] - step))
-            # Eski içerik yüklenirse (başa ekleme) görünüm sıçrayabilir: önceki karenin yeni konumunu hesapla,
-            # kare komşu değilse önceki karenin hemen üstüne geri dön.
-            for _ in range(3):
-                growth = st["height"] - old["height"]
-                expected = old["top"] + growth - st["top"]  # önceki karenin ekranda kaydığı miktar (css px)
-                if 0 < expected <= st["client"] * 0.95:
-                    break
-                st = _scroll_to(c, max(0, old["top"] + growth - step))
-            growth = st["height"] - old["height"]
-            moved = old["top"] + growth - st["top"]
-            hints = [round(v * ppc) for v in (moved, old["top"] - st["top"]) if v > 0]
+                continue
+            st = _scroll_to(c, old["top"] + step)
+            moved = st["top"] - old["top"]
+            hints = [round(moved * ppc)] if moved > 0 else []
             res = stitch.add(_shot(c, st), hints=hints)
             log.append(f"top {old['top']:.0f}->{st['top']:.0f} height {old['height']}->{st['height']} ipucu={hints} sonuç={res}")
             if res == "end":
-                if old["top"] - st["top"] <= 0 and growth == 0:
+                if moved <= 0:
                     stop = "end"
                     break
                 continue

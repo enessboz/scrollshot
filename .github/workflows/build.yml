@@ -24,6 +24,7 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
           sed -i '' "s/^BUILD = .*/BUILD = $BUILD/" _version.py
           python test_stitch.py
+          python test_pixel_sim.py
           python test_updater.py
           python test_app_logic.py
           pyinstaller --noconfirm --windowed --name ScrollShot \
@@ -58,6 +59,7 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
           sed -i "s/^BUILD = .*/BUILD = $BUILD/" _version.py
           python test_stitch.py
+          python test_pixel_sim.py
           python test_updater.py
           python test_app_logic.py
           python test_cdp.py || echo "UYARI: CDP testi geçmedi (derleme devam ediyor)"
