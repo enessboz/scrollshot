@@ -143,7 +143,7 @@ def main():
         since = int(1767225600000 + 60 * 3600 * 1000)  # 2026-01-01T00:00Z + 60 saat
         img2, ppc2, info2 = cdp.capture_target(ws2, since_ms=since)
         print(f"tarih sınırı: {info2['frames']} kare, {info2['stop']}, {img2.size}, not={info2['note']!r}")
-        exp = truth.crop((0, int(y60 * ppc2) - 4, truth.width, truth.height))
+        exp = truth.crop((0, int(y60 * ppc2) - int(round(4 * ppc2)), truth.width, truth.height))
         assert info2["stop"] == "end", info2["stop"]
         assert img2.size == exp.size, f"sınırlı boyut {img2.size} != {exp.size}"
         bad2 = int((np.abs(np.asarray(img2, dtype=int) - np.asarray(exp, dtype=int)).max(axis=2) > 8).sum())
